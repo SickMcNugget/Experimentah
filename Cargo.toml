@@ -1,0 +1,9 @@
+[package]
+name = "experimentah"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+toml = "0.8.16"
+serde = { version = "1.0.204", features = ["derive"] }
+# serde = "1.0.204"

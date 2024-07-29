@@ -1,0 +1,34 @@
+[metric_server]
+host = "host1"
+port = 50000
+
+[[hosts]]
+name = "host1"
+address = "my-host.com"
+infrastructure = "linux"
+
+[[hosts]]
+name = "host2"
+address = "my-host2.com"
+
+[[runners]]
+name = "runner1"
+host = "host1"
+port = 2000
+
+[[runners]]
+name = "runner2"
+host = "host2"
+port = 2001
+
+[[exporters]]
+name = "test-exporter"
+host = "host1"
+port = 9100
+kind = "node"
+
+[[exporters]]
+name = "other-exporter"
+host = "host2"
+port = 9101
+kind = "temperature"
