@@ -1,9 +1,23 @@
-[package]
+[workspace]
+members = ["controller", "report-api"]
+resolver = "2"
+
+# [package]
+# name = "experimentah"
+
+[workspace.package]
 name = "experimentah"
 version = "0.1.0"
 edition = "2021"
 
-[dependencies]
+[workspace.dependencies]
 toml = "0.8.16"
+serde_json = "1.0"
 serde = { version = "1.0.204", features = ["derive"] }
-# serde = "1.0.204"
+clap = { version = "4.5.11", features = ["derive", "string"] }
+reqwest = { version = "0.12.5", features = ["json"] }
+tokio = { version = "1", features = ["full"] }
+
+# [[bin]]
+# name = "controller"
+# path = "controller/src/main.rs"

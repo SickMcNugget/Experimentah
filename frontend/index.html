@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <script
+      src="https://unpkg.com/htmx.org@2.0.1"
+      integrity="sha384-QWGpdj554B4ETpJJC9z+ZHJcA/i59TyjxEPXiiUgN2WmTyV5OEZWCD6gQhgkdpB/"
+      crossorigin="anonymous"
+    ></script>
+    <title>Experimentah</title>
+    <link href="style.css" rel="stylesheet" />
+    <link rel="icon" type="image/x-icon" href="favicon.ico">
+  </head>
+  <main>
+    <ul class="nav">
+      <li>
+        <button hx-get="/" hx-target="main" hx-swap="outerHTML">Home</button>
+      </li>
+      <li>
+        <button hx-get="/workload-repo" hx-target="main" hx-swap="outerHTML">
+          Workload Repo
+        </button>
+      </li>
+      <li>
+        <button hx-get="/report-api" hx-target="main" hx-swap="outerHTML">
+          Report API
+        </button>
+      </li>
+      <li><button hx-get="/about" hx-target="main" hx-swap="outerHTML">About</a></li>
+    </ul>
+    <div>
+      <title>YO</title>
+    </div>
+  </main>
+</html>

@@ -1,0 +1,44 @@
+/* ul { */
+/*     list-style-type: none; */
+/*     margin: 0; */
+/*     padding: 0; */
+/* } */
+
+:root {
+    --main: #071010;
+    --main-light: #333;
+    --highlight: #352;
+}
+
+body {
+    margin: 0;
+    padding: 0;
+    background-color:var(--main);
+}
+
+li {
+    float: left;
+}
+
+li button {
+    background-color: var(--highlight);
+    /* #784; */
+    display: inline-block;
+    color: white;
+    border: none;
+    text-align: center;
+    padding: 14px 16px;
+    text-decoration: none;
+}
+
+li button:hover {
+    background-color: #111;
+}
+
+.nav {
+    list-style-type: none;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    background-color: var(--main-light);
+}

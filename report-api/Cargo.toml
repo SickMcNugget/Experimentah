@@ -1,0 +1,9 @@
+[package]
+name = "report-api"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+axum = "0.7.5"
+tokio = { workspace = true }
+tower = "0.4.13"
