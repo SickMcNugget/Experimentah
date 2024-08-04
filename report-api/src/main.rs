@@ -1,11 +1,61 @@
+use std::{
+    env,
+    ffi::OsString,
+    fs::read_dir,
+    io::{self, ErrorKind},
+    net::SocketAddr,
+    path::PathBuf,
+};
+
 use axum::{
     routing::{get, post},
     Router,
 };
 
+use tower_http::services::ServeDir;
+
 #[tokio::main]
 async fn main() {
-    let app = Router::new()
+    tokio::join!(
+        serve("Metrics API", report_api(), 3000),
+        serve("Workload Repo", workload_repo(), 3001)
+    );
+}
+
+async fn serve(name: &str, app: Router, port: u16) {
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    println!("{name} listening on {}", listener.local_addr().unwrap());
+    axum::serve(listener, app).await.unwrap();
+}
+
+fn get_root() -> io::Result<PathBuf> {
+    let path = env::current_dir()?;
+    let mut path_ancestors = path.as_path().ancestors();
+
+    while let Some(p) = path_ancestors.next() {
+        let is_root = read_dir(p)?
+            .into_iter()
+            .any(|p| p.unwrap().file_name() == OsString::from("Cargo.toml"));
+        if is_root {
+            return Ok(PathBuf::from(p));
+        }
+    }
+
+    Err(io::Error::new(
+        ErrorKind::NotFound,
+        "Ran out of places to find Cargo.toml",
+    ))
+}
+
+fn workload_repo() -> Router {
+    let path = get_root().unwrap();
+    println!("{:?}", path.join("workload_repo"));
+    Router::new().nest_service("/workload_repo", ServeDir::new(path.join("workload_repo")))
+}
+
+fn report_api() -> Router {
+    Router::new()
         .route("/", get(root))
         .route("/status", get(status))
         .route("/prometheus", get(prometheus_status))
@@ -20,14 +70,7 @@ async fn main() {
         .route("/job/{job_id}/start", post(job_start))
         .route("/job/{job_id}/complete", post(job_complete))
         .route("/job/{job_id}/fail", post(job_failed))
-        .route("/job/{job_id}", get(job_status));
-
-    let listener = tokio::net::TcpListener::bind("localhost:3000")
-        .await
-        .unwrap();
-    let serving = axum::serve(listener, app);
-    println!("Now serving at http://localhost:3000!");
-    serving.await.unwrap();
+        .route("/job/{job_id}", get(job_status))
 }
 
 async fn root() -> &'static str {
