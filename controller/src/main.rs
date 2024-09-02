@@ -5,7 +5,8 @@ use toml;
 
 use clap::Parser;
 
-use experimentah::controller::parse::{Config, Experiment, ExperimentConfig};
+// use controller::{Config, Experiment, ExperimentConfig};
+use controller::parse::{Config, Experiment, ExperimentConfig};
 
 use reqwest::Client;
 
