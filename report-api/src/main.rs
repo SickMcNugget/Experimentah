@@ -8,6 +8,7 @@ use std::{
 };
 
 use axum::{
+    http::StatusCode,
     routing::{get, post},
     Router,
 };
@@ -53,7 +54,7 @@ fn get_root() -> io::Result<PathBuf> {
 fn workload_repo() -> Router {
     let path = get_root().unwrap();
     println!("{:?}", path.join("workload_repo"));
-    Router::new().nest_service("/workload_repo", get(()))// ServeDir::new(path.join("workload_repo")))
+    Router::new().nest_service("/workload_repo", get(())) // ServeDir::new(path.join("workload_repo")))
 }
 
 fn report_api() -> Router {
@@ -105,26 +106,27 @@ async fn root() -> &'static str {
         "POST /job/fail\n",
     )
 }
-async fn status() -> Result<(), env::VarError> {
-    let client = reqwest::Client::new();
+// async fn status() -> Result<String, StatusCode> {
+//     let client = reqwest::Client::new();
+//
+//     // let mongo_host = env::var("MONGO_HOST")?;
+//     // let mongo_port = env::var("MONGO_PORT")?;
+//     // let mongo_username = env::var("MONGO_USERNAME")?;
+//     // let mongo_password = env::var("MONGO_PASSWORD")?;
+//     // let mongo_authentication_server = env::var("MONGO_AUTHENTICATION_SERVER")?;
+//
+//     let prometheus_host = env::var("PROMETHEUS_HOST");
+//     let prometheus_port = env::var("PROMETHEUS_PORT");
+//     let prometheus_username = env::var("PROMETHEUS_USERNAME");
+//     let prometheus_password = env::var("PROMETHEUS_PASSWORD");
+//     let prometheus_authentication_server = env::var("PROMETHEUS_AUTHENTICATION_SERVER");
+//
+//     let prometheus_request = client.get("http://PROMETHEUS_URL/-/healthy").send();
+//     let mongo_request =
+//
+//     Ok(String::from("yes"))
+// }
 
-    let mongo_host = env::var("MONGO_HOST")?;
-    let mongo_port = env::var("MONGO_PORT")?;
-    let mongo_username = env::var("MONGO_USERNAME")?;
-    let mongo_password = env::var("MONGO_PASSWORD")?;
-    let mongo_authentication_server = env::var("MONGO_AUTHENTICATION_SERVER")?;
-
-    let prometheus_host = env::var("PROMETHEUS_HOST")?;
-    let prometheus_port = env::var("PROMETHEUS_PORT")?;
-    let prometheus_username = env::var("PROMETHEUS_USERNAME")?;
-    let prometheus_password = env::var("PROMETHEUS_PASSWORD")?;
-    let prometheus_authentication_server = env::var("PROMETHEUS_AUTHENTICATION_SERVER")?;
-
-    let prometheus_request = client.get("http://PROMETHEUS_URL/-/healthy").send();
-    let mongo_request = 
-
-    Ok(())
-}
 async fn prometheus_status() {}
 async fn prometheus_configure() {}
 async fn prometheus_reset() {}
