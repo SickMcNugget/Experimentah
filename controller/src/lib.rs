@@ -1,5 +1,6 @@
 pub mod parse {
     use serde::{Deserialize, Serialize};
+    use std::collections::HashMap;
     use std::fs;
     use std::path::{Path, PathBuf};
 
@@ -9,6 +10,12 @@ pub mod parse {
         hosts: Vec<Host>,
         runners: Vec<Runner>,
         exporters: Vec<Exporter>,
+    }
+
+    #[derive(Serialize)]
+    pub enum PrometheusRequestBody<'a> {
+        String(String),
+        HashMap(Vec<HashMap<&'a str, String>>),
     }
 
     impl Config {
@@ -46,7 +53,19 @@ pub mod parse {
             urls
         }
 
-        pub fn exporters(&self) -> Vec<String> {}
+        pub fn exporters_map(&self) -> Vec<HashMap<&str, String>> {
+            let mut exporters: Vec<HashMap<&str, String>> = Vec::new();
+            for exporter in self.exporters.iter() {
+                exporters.push(HashMap::from([
+                    ("name", exporter.name.clone()),
+                    ("host", exporter.host.clone()),
+                    ("port", exporter.port.to_string()),
+                    ("kind", exporter.kind.clone()),
+                    ("poll_interval", 1.to_string()), // Seconds
+                ]))
+            }
+            exporters
+        }
     }
 
     #[derive(Deserialize, Debug, PartialEq)]
@@ -352,5 +371,88 @@ pub mod parse {
             );
             assert!(ExperimentConfig::validate(&experiment_config, &config).is_ok());
         }
+    }
+}
+
+pub mod run {
+    use crate::parse::{Config, Experiment, ExperimentConfig, PrometheusRequestBody};
+    use reqwest::Client;
+    use std::collections::HashMap;
+
+    // The ExperimentRunner should only be used AFTER parsing has been completed!
+    pub struct ExperimentRunner {
+        config: Config,
+        experiment_config: ExperimentConfig,
+        client: Client,
+    }
+
+    impl ExperimentRunner {
+        pub fn new(config: Config, experiment_config: ExperimentConfig, client: Client) -> Self {
+            Self {
+                config,
+                experiment_config,
+                client,
+            }
+        }
+
+        fn run_experiments(&self) -> Result<Vec<String>, String> {
+            let successful_experiments = Vec::new();
+
+            Ok(successful_experiments)
+        }
+
+        fn run_experiment(&self, experiment: &Experiment) -> Result<String, String> {
+            let experiment_id = { self.create_experiment(experiment) };
+
+            exporters_mapping = self.configure_prometheus(experiment_id);
+            Ok("yes!".to_string())
+        }
+
+        async fn create_experiment(&self, experiment: &Experiment) -> reqwest::Result<String> {
+            let response = {
+                let endpoint = format!("http://{}/experiment", self.config.metric_server());
+                let now = get_time();
+                let body = HashMap::from([("name", experiment.name()), ("timestamp_ms", &now)]);
+                self.client.post(endpoint).json(&body).send().await?
+            };
+
+            response.error_for_status_ref()?;
+            let ret = response.json().await?;
+            Ok(ret)
+        }
+
+        async fn configure_prometheus(
+            &self,
+            experiment_id: String,
+        ) -> reqwest::Result<HashMap<String, String>> {
+            let response = {
+                let endpoint = format!("http://{}/prometheus", self.config.metric_server());
+                let body = HashMap::from([
+                    (
+                        "experiment_id",
+                        PrometheusRequestBody::String(experiment_id),
+                    ),
+                    (
+                        "exporters",
+                        PrometheusRequestBody::HashMap(self.config.exporters_map()),
+                    ),
+                ]);
+                self.client.post(endpoint).json(&body).send().await?
+            };
+
+            response.error_for_status_ref()?;
+            let ret = response.json().await?;
+            Ok(ret)
+        }
+
+        // pub fn run_experiment() -> Result<String, String> {}
+    }
+
+    fn get_time() -> String {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("Time went backwards")
+            .as_millis()
+            .to_string()
     }
 }

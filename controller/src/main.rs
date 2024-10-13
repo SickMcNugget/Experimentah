@@ -5,7 +5,7 @@ use toml;
 
 use clap::Parser;
 
-use experimentah::controller::parse::{Config, Experiment, ExperimentConfig};
+use controller::parse::{Config, Experiment, ExperimentConfig};
 
 use reqwest::Client;
 
@@ -52,12 +52,19 @@ async fn main() {
     }
 
     let runs: u16 = experiment_config.runs();
-    println!("= Running Experiments {}=", runs);
+    println!("= Running Experiment {}=", runs);
 
-    for i in 0..runs {}
+    for i in 0..runs {
+        
+        
+    }
+
+    println!("\n= Successful Experiments =");
+    println!("{}", )
 
     // Need to validate host endpoints in the jobs for each experiment
     //  This requires comparing against config
+    //
     //
     // Contact all servers: metrics-api, workload repository, postgres, prometheus, runner(s)
     //  Also check periodically during running!
@@ -70,20 +77,22 @@ async fn main() {
     //  Post results of job and run next one until finished
 }
 
-fn run_all(client: &Client, experiment_config: &ExperimentConfig, config: &Config) {
-    for experiment in experiment_config.experiments().iter() {
-        run_experiment(experiment, &client, experiment_config, config);
-    }
-}
+// fn run_all(client: &Client, experiment_config: &ExperimentConfig, config: &Config) {
+//     for experiment in experiment_config.experiments().iter() {
+//         run_experiment(experiment, &client, experiment_config, config);
+//     }
+// }
 
 fn run_experiment(
     experiment: &Experiment,
     client: &Client,
     experiment_config: &ExperimentConfig,
     config: &Config,
-) {
+) -> Result<Vec<String>, String> {
     let experiment_id = create_experiment(experiment, client, &config.metric_server());
     exporters_mapping = configure_prometheus(experiment_id, config);
+
+    Ok(vec!["ligma".to_string()])
 }
 
 async fn create_experiment(
@@ -106,6 +115,7 @@ async fn create_experiment(
 
 fn configure_prometheus(experiment_id: String, config: &Config, url: &String) -> HashMap<&str, String> {
     let endpoint = format!("http://{}/prometheus", url);
+    
 
 
 
