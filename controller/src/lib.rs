@@ -1,8 +1,8 @@
 pub mod parse {
     use serde::{Deserialize, Serialize};
     use std::collections::HashMap;
-    use std::fs;
     use std::path::{Path, PathBuf};
+    use std::{fs, io};
 
     #[derive(Deserialize, Debug)]
     pub struct Config {
@@ -16,6 +16,27 @@ pub mod parse {
     pub enum PrometheusRequestBody<'a> {
         String(String),
         HashMap(Vec<HashMap<&'a str, String>>),
+    }
+
+    #[derive(Serialize)]
+    pub enum DbSaveRequestBody {
+        String(String),
+        Commands(Vec<String>),
+    }
+
+    #[derive(Serialize)]
+    pub enum CreateJobRequest {
+        String(String),
+        Exporters(Vec<String>),
+        Bool(bool),
+        U8(u8),
+        Timestamp(u128),
+    }
+
+    #[derive(Serialize)]
+    pub enum CreateExperimentRequest {
+        String(String),
+        Time(u128),
     }
 
     impl Config {
@@ -127,9 +148,15 @@ pub mod parse {
         }
     }
 
+    fn default_id() -> String {
+        "N/A".into()
+    }
+
     #[derive(Deserialize, Debug)]
     pub struct Experiment {
         name: String,
+        #[serde(default = "default_id")]
+        pub id: String,
         description: String,
         kind: String,
         #[serde(default)]
@@ -142,6 +169,22 @@ pub mod parse {
     impl Experiment {
         pub fn name(&self) -> &String {
             &self.name
+        }
+
+        pub fn kind(&self) -> &String {
+            &self.kind
+        }
+
+        pub fn setup(&self) -> &Vec<RemoteExecution> {
+            &self.setup
+        }
+
+        pub fn teardown(&self) -> &Vec<RemoteExecution> {
+            &self.teardown
+        }
+
+        pub fn jobs(&self) -> &Vec<Job> {
+            &self.jobs
         }
 
         fn validate(experiment: &Experiment, config: &Config) -> Result<(), String> {
@@ -183,13 +226,31 @@ pub mod parse {
     }
 
     #[derive(Deserialize, Debug, PartialEq)]
-    struct RemoteExecution {
-        runners: Vec<String>,
-        scripts: Vec<PathBuf>,
+    pub struct RemoteExecution {
+        pub runners: Vec<String>,
+        pub scripts: Vec<PathBuf>,
+    }
+
+    impl RemoteExecution {
+        pub fn commands(&self) -> io::Result<Vec<String>> {
+            let mut commands = Vec::new();
+
+            for script in self.scripts.iter() {
+                let script_str = fs::read_to_string(script)?;
+                for mut line in script_str.lines() {
+                    line = line.trim();
+                    if line != "" {
+                        commands.push(line.into());
+                    }
+                }
+            }
+
+            Ok(commands)
+        }
     }
 
     #[derive(Deserialize, PartialEq, Debug)]
-    struct Job {
+    pub struct Job {
         name: String,
         runner: String,
         execute: PathBuf,
@@ -199,6 +260,26 @@ pub mod parse {
     }
 
     impl Job {
+        pub fn name(&self) -> &String {
+            &self.name
+        }
+
+        pub fn runner(&self) -> &String {
+            &self.runner
+        }
+
+        pub fn execute(&self) -> &PathBuf {
+            &self.execute
+        }
+
+        pub fn arguments(&self) -> &u8 {
+            &self.arguments
+        }
+
+        pub fn exporters(&self) -> &Vec<String> {
+            &self.exporters
+        }
+
         fn validate(job: &Job, config: &Config) -> Result<(), String> {
             if !config
                 .runners
@@ -375,25 +456,43 @@ pub mod parse {
 }
 
 pub mod run {
-    use crate::parse::{Config, Experiment, ExperimentConfig, PrometheusRequestBody};
+    use crate::parse::{
+        Config, DbSaveRequestBody, Experiment, ExperimentConfig, Job, PrometheusRequestBody,
+    };
     use reqwest::Client;
-    use std::collections::HashMap;
+    use std::{any::Any, collections::HashMap, error::Error, hash::Hash};
 
     // The ExperimentRunner should only be used AFTER parsing has been completed!
     pub struct ExperimentRunner {
         config: Config,
         experiment_config: ExperimentConfig,
         client: Client,
+        rt: tokio::runtime::Runtime,
     }
 
     impl ExperimentRunner {
-        pub fn new(config: Config, experiment_config: ExperimentConfig, client: Client) -> Self {
-            Self {
+        pub fn build(
+            config: Config,
+            experiment_config: ExperimentConfig,
+            client: Client,
+        ) -> std::io::Result<Self> {
+            Ok(Self {
                 config,
                 experiment_config,
                 client,
-            }
+                rt: tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()?,
+            })
         }
+        // pub fn new(config: Config, experiment_config: ExperimentConfig, client: Client) -> Self {
+        //     Self {
+        //         config,
+        //         experiment_config,
+        //         client,
+        //
+        //     }
+        // }
 
         fn run_experiments(&self) -> Result<Vec<String>, String> {
             let successful_experiments = Vec::new();
@@ -401,12 +500,83 @@ pub mod run {
             Ok(successful_experiments)
         }
 
-        fn run_experiment(&self, experiment: &Experiment) -> Result<String, String> {
-            let experiment_id = { self.create_experiment(experiment) };
+        fn run_experiment(&self, experiment: &mut Experiment) -> Result<String, Box<dyn Error>> {
+            {
+                let experiment_id = self.rt.block_on(self.create_experiment(experiment))?;
+                experiment.id = experiment_id;
+            }
 
-            exporters_mapping = self.configure_prometheus(experiment_id);
+            let exporters_mapping = self.rt.block_on(self.configure_prometheus(experiment))?;
+            // TODO(joren): add wait for prometheus ready
+
+            self.rt.block_on(self.experiment_setup(experiment))?;
+
+            let mut job_ids = Vec::new();
+            for job in experiment.jobs().iter() {
+                let job_id = self.rt.block_on(self.run_job(job, experiment));
+                job_ids.push(job_id);
+            }
+
+            // exporters_mapping = self.configure_prometheus(experiment_id);
             Ok("yes!".to_string())
         }
+
+        async fn wait_for_jobs() {}
+
+        async fn create_job(&self, job: &Job, experiment: &Experiment) -> reqwest::Result<String> {
+            let response = {
+                let endpoint = format!(
+                    "http://{}/experiment/{}/job",
+                    self.config.metric_server(),
+                    experiment.id
+                );
+                let body = HashMap::from([
+                    ("experimentId", experiment.id.clone()),
+                    ("runnerName", job.runner().clone()),
+                    ("exporters", "yummers".into()),
+                    ("workload", job.name().clone()),
+                    ("supplementary", "false".into()),
+                    ("resultsType", experiment.kind().clone()),
+                    ("arguments", job.arguments().to_string()),
+                    ("timestampMs", get_time()),
+                ]);
+                self.client.post(endpoint).json(&body).send().await?
+            };
+
+            response.error_for_status_ref()?;
+            let ret = response.json().await?;
+            Ok(ret)
+        }
+
+        async fn start_job(
+            &self,
+            job_id: &str,
+            job: &Job,
+            experiment: &Experiment,
+        ) -> reqwest::Result<()> {
+            let response = {
+                let endpoint = format!("http://{}/job", job.runner());
+                let args_str = job.arguments().to_string();
+                let body: HashMap<&str, &str> = HashMap::from([
+                    ("jobId", job_id),
+                    ("experimentId", &experiment.id),
+                    ("workload", job.name()),
+                    ("workloadType", experiment.kind()),
+                    ("arguments", &args_str),
+                ]);
+                self.client.post(endpoint).json(&body).send().await?
+            };
+
+            response.error_for_status_ref()?;
+            // let ret = response.json().await?;
+            Ok(())
+        }
+
+        async fn run_job(&self, job: &Job, experiment: &Experiment) {
+            let job_id = self.create_job(job, experiment).await.unwrap();
+            self.start_job(&job_id, job, experiment);
+        }
+        // fn update_experiment(&self, experiment: &mut Experiment) {}
 
         async fn create_experiment(&self, experiment: &Experiment) -> reqwest::Result<String> {
             let response = {
@@ -423,14 +593,14 @@ pub mod run {
 
         async fn configure_prometheus(
             &self,
-            experiment_id: String,
+            experiment: &Experiment,
         ) -> reqwest::Result<HashMap<String, String>> {
             let response = {
                 let endpoint = format!("http://{}/prometheus", self.config.metric_server());
                 let body = HashMap::from([
                     (
                         "experiment_id",
-                        PrometheusRequestBody::String(experiment_id),
+                        PrometheusRequestBody::String(experiment.id.clone()),
                     ),
                     (
                         "exporters",
@@ -445,6 +615,64 @@ pub mod run {
             Ok(ret)
         }
 
+        async fn experiment_setup(&self, experiment: &Experiment) -> Result<(), Box<dyn Error>> {
+            for setup in experiment.setup().iter() {
+                for runner in self.config.runners().iter() {
+                    self.default_setup_tasks(runner);
+
+                    let commands = setup.commands()?;
+                    self.custom_setup_tasks(runner, &commands);
+
+                    let response = {
+                        let endpoint = format!(
+                            "http://{}/experiment/{}/setup",
+                            self.config.metric_server(),
+                            experiment.id
+                        );
+                        let body = HashMap::from([
+                            (
+                                "experimentId",
+                                DbSaveRequestBody::String(experiment.id.clone()),
+                            ),
+                            ("runner", DbSaveRequestBody::String(runner.to_string())),
+                            ("commands", DbSaveRequestBody::Commands(commands)),
+                        ]);
+                        self.client.post(endpoint).json(&body).send().await?
+                    };
+                    response.error_for_status_ref();
+                    let ret = response.json().await?;
+                }
+            }
+            Ok(())
+        }
+
+        // async fn
+        async fn custom_setup_tasks(
+            &self,
+            runner: &String,
+            commands: &Vec<String>,
+        ) -> reqwest::Result<()> {
+            let response = {
+                let endpoint = format!("http://{}/exec", runner);
+                let body = HashMap::from([("commands", commands)]);
+                self.client.post(endpoint).json(&body).send().await?
+            };
+
+            response.error_for_status_ref()?;
+            let ret = response.json().await?;
+            Ok(ret)
+        }
+
+        async fn default_setup_tasks(&self, runner: &String) -> reqwest::Result<()> {
+            let response = {
+                let endpoint = format!("http://{}/default_setup", runner);
+                self.client.post(endpoint).send().await?
+            };
+
+            response.error_for_status_ref();
+            // let _ = response.json().await?;
+            Ok(())
+        }
         // pub fn run_experiment() -> Result<String, String> {}
     }
 
