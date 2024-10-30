@@ -6,24 +6,24 @@ description = "Just a basic test experiment"
 kind = "test-result"
 [[experiments.setup]]
 runners = ["runner1"]
-scripts = ["test-setup.sh"]
+scripts = ["./scripts/test-setup.sh"]
 [[experiments.teardown]]
 runners = ["runner2"]
-scripts = ["test-teardown.sh"]
+scripts = ["./scripts/test-teardown.sh"]
 [[experiments.jobs]]
 name = "test-job"
 runner = "runner1"
-execute = "actual-work.sh"
+execute = "./scripts/actual-work.sh"
 arguments = 0
 exporters = ["test-exporter", "other-exporter"]
 [[experiments.jobs]]
 name = "test-job2"
 runner = "runner2"
-execute = "actual-work.sh"
+execute = "./scripts/actual-work.sh"
 arguments = 0
 exporters = ["test-exporter"]
 [[experiments.jobs]]
 name = "test-job3"
 runner = "runner1"
-execute = "actual-work.sh"
+execute = "./scripts/actual-work.sh"
 arguments = 0

@@ -1,4 +1,4 @@
-[metric_server]
+[metrics_api]
 host = "host1"
 port = 50000
 

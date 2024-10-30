@@ -1,12 +1,14 @@
 pub mod parse {
+    use serde::ser::Error;
     use serde::{Deserialize, Serialize};
+    use std::cell::{Ref, RefCell};
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
     use std::{fs, io};
 
     #[derive(Deserialize, Debug)]
     pub struct Config {
-        metric_server: MetricServer,
+        metrics_api: MetricsApi,
         hosts: Vec<Host>,
         runners: Vec<Runner>,
         exporters: Vec<Exporter>,
@@ -41,7 +43,7 @@ pub mod parse {
 
     impl Config {
         pub fn metric_server(&self) -> String {
-            let host_name = &self.metric_server.host;
+            let host_name = &self.metrics_api.host;
             let pos = self
                 .hosts
                 .iter()
@@ -53,7 +55,7 @@ pub mod parse {
                 .get(pos)
                 .expect("Somehow, the host was found but couldn't be retrieved from parsed Config")
                 .address;
-            let port = &self.metric_server.port;
+            let port = &self.metrics_api.port;
 
             format!("{}:{}", url, port)
         }
@@ -90,7 +92,7 @@ pub mod parse {
     }
 
     #[derive(Deserialize, Debug, PartialEq)]
-    struct MetricServer {
+    struct MetricsApi {
         host: String,
         port: u16,
     }
@@ -148,15 +150,15 @@ pub mod parse {
         }
     }
 
-    fn default_id() -> String {
-        "N/A".into()
+    fn default_id() -> RefCell<String> {
+        RefCell::new(String::from("N/A"))
     }
 
     #[derive(Deserialize, Debug)]
     pub struct Experiment {
         name: String,
         #[serde(default = "default_id")]
-        pub id: String,
+        id: RefCell<String>,
         description: String,
         kind: String,
         #[serde(default)]
@@ -185,6 +187,19 @@ pub mod parse {
 
         pub fn jobs(&self) -> &Vec<Job> {
             &self.jobs
+        }
+
+        pub fn id(&self) -> Ref<'_, String> {
+            self.id.borrow()
+        }
+
+        pub fn allocate_id(&self, id: String) -> Result<(), &str> {
+            if *self.id.borrow() != "N/A" {
+                Err("Experiment ID already allocated!")
+            } else {
+                *self.id.borrow_mut() = id;
+                Ok(())
+            }
         }
 
         fn validate(experiment: &Experiment, config: &Config) -> Result<(), String> {
@@ -340,8 +355,8 @@ pub mod parse {
             let config: Config = toml::from_str(&config_str).expect("Failed to parse test config");
 
             assert_eq!(
-                config.metric_server,
-                MetricServer {
+                config.metrics_api,
+                MetricsApi {
                     host: "host1".into(),
                     port: 50000,
                 },
@@ -460,12 +475,14 @@ pub mod run {
         Config, DbSaveRequestBody, Experiment, ExperimentConfig, Job, PrometheusRequestBody,
     };
     use reqwest::Client;
+    use serde_json::json;
     use std::{any::Any, collections::HashMap, error::Error, hash::Hash};
 
     // The ExperimentRunner should only be used AFTER parsing has been completed!
     pub struct ExperimentRunner {
         config: Config,
         experiment_config: ExperimentConfig,
+
         client: Client,
         rt: tokio::runtime::Runtime,
     }
@@ -485,6 +502,15 @@ pub mod run {
                     .build()?,
             })
         }
+
+        pub fn config(&self) -> &Config {
+            &self.config
+        }
+
+        pub fn experiment_config(&self) -> &ExperimentConfig {
+            &self.experiment_config
+        }
+
         // pub fn new(config: Config, experiment_config: ExperimentConfig, client: Client) -> Self {
         //     Self {
         //         config,
@@ -494,16 +520,20 @@ pub mod run {
         //     }
         // }
 
-        fn run_experiments(&self) -> Result<Vec<String>, String> {
+        pub fn run_experiments(&self) -> Result<Vec<String>, String> {
             let successful_experiments = Vec::new();
+
+            for experiment in self.experiment_config.experiments().iter() {
+                self.run_experiment(experiment);
+            }
 
             Ok(successful_experiments)
         }
 
-        fn run_experiment(&self, experiment: &mut Experiment) -> Result<String, Box<dyn Error>> {
+        fn run_experiment(&self, experiment: &Experiment) -> Result<String, Box<dyn Error>> {
             {
                 let experiment_id = self.rt.block_on(self.create_experiment(experiment))?;
-                experiment.id = experiment_id;
+                experiment.allocate_id(experiment_id)?;
             }
 
             let exporters_mapping = self.rt.block_on(self.configure_prometheus(experiment))?;
@@ -521,6 +551,22 @@ pub mod run {
             Ok("yes!".to_string())
         }
 
+        pub async fn check_metrics_api(&self) -> reqwest::Result<()> {
+            let endpoint = format!("http://{}/status", self.config.metric_server());
+            let response = self.client.get(endpoint).send().await?; // .await?;
+            response.error_for_status()?;
+            Ok(())
+        }
+
+        pub async fn check_runners(&self) -> reqwest::Result<()> {
+            for url in self.config.runners().iter() {
+                let endpoint = format!("http://{}/status", url);
+                let response = self.client.get(endpoint).send().await?;
+                response.error_for_status()?;
+            }
+            Ok(())
+        }
+
         async fn wait_for_jobs() {}
 
         async fn create_job(&self, job: &Job, experiment: &Experiment) -> reqwest::Result<String> {
@@ -528,18 +574,28 @@ pub mod run {
                 let endpoint = format!(
                     "http://{}/experiment/{}/job",
                     self.config.metric_server(),
-                    experiment.id
+                    experiment.id()
                 );
-                let body = HashMap::from([
-                    ("experimentId", experiment.id.clone()),
-                    ("runnerName", job.runner().clone()),
-                    ("exporters", "yummers".into()),
-                    ("workload", job.name().clone()),
-                    ("supplementary", "false".into()),
-                    ("resultsType", experiment.kind().clone()),
-                    ("arguments", job.arguments().to_string()),
-                    ("timestampMs", get_time()),
-                ]);
+                let body = json!({
+                    "experimentId": *experiment.id(),
+                    "runnerName": job.runner(),
+                    "exporters": "yummers",
+                    "workload": job.name(),
+                    "supplementary": "false",
+                    "resultsType": experiment.kind(),
+                    "arguments": job.arguments(),
+                    "timestampMs": get_time(),
+                });
+                // let body = HashMap::from([
+                //     ("experimentId", experiment.id().clone()),
+                //     ("runnerName", job.runner().clone()),
+                //     ("exporters", "yummers".into()),
+                //     ("workload", job.name().clone()),
+                //     ("supplementary", "false".into()),
+                //     ("resultsType", experiment.kind().clone()),
+                //     ("arguments", job.arguments().to_string()),
+                //     ("timestampMs", get_time()),
+                // ]);
                 self.client.post(endpoint).json(&body).send().await?
             };
 
@@ -556,14 +612,21 @@ pub mod run {
         ) -> reqwest::Result<()> {
             let response = {
                 let endpoint = format!("http://{}/job", job.runner());
-                let args_str = job.arguments().to_string();
-                let body: HashMap<&str, &str> = HashMap::from([
-                    ("jobId", job_id),
-                    ("experimentId", &experiment.id),
-                    ("workload", job.name()),
-                    ("workloadType", experiment.kind()),
-                    ("arguments", &args_str),
-                ]);
+                // let args_str = job.arguments().to_string();
+                let body = json!({
+                    "jobId": job_id,
+                    "experimentId": *experiment.id(),
+                    "workload": job.name(),
+                    "workloadType": experiment.kind(),
+                    "arguments": job.arguments()
+                });
+                // let body: HashMap<&str, &str> = HashMap::from([
+                //     ("jobId", job_id),
+                //     ("experimentId", &experiment.id()()),
+                //     ("workload", job.name()),
+                //     ("workloadType", experiment.kind()),
+                //     ("arguments", &args_str),
+                // ]);
                 self.client.post(endpoint).json(&body).send().await?
             };
 
@@ -581,14 +644,21 @@ pub mod run {
         async fn create_experiment(&self, experiment: &Experiment) -> reqwest::Result<String> {
             let response = {
                 let endpoint = format!("http://{}/experiment", self.config.metric_server());
-                let now = get_time();
-                let body = HashMap::from([("name", experiment.name()), ("timestamp_ms", &now)]);
+                let body = json!({
+                    "name": experiment.name(),
+                    "timestampMs": get_time()
+                });
+                // let body = HashMap::from([("name", experiment.name()), ("timestamp_ms", &now)]);
                 self.client.post(endpoint).json(&body).send().await?
             };
 
             response.error_for_status_ref()?;
-            let ret = response.json().await?;
-            Ok(ret)
+            let experiment_id = response.json().await?;
+            // experiment
+            //     .allocate_id(experiment_id)
+            //     .expect("Somehow the experiment id was already allocated");
+
+            Ok(experiment_id)
         }
 
         async fn configure_prometheus(
@@ -597,16 +667,20 @@ pub mod run {
         ) -> reqwest::Result<HashMap<String, String>> {
             let response = {
                 let endpoint = format!("http://{}/prometheus", self.config.metric_server());
-                let body = HashMap::from([
-                    (
-                        "experiment_id",
-                        PrometheusRequestBody::String(experiment.id.clone()),
-                    ),
-                    (
-                        "exporters",
-                        PrometheusRequestBody::HashMap(self.config.exporters_map()),
-                    ),
-                ]);
+                let body = json!({
+                    "experimentId": *experiment.id(),
+                    "exporters": self.config.exporters_map()
+                });
+                // let body = HashMap::from([
+                //     (
+                //         "experiment_id",
+                //         PrometheusRequestBody::String(experiment.id().clone()),
+                //     ),
+                //     (
+                //         "exporters",
+                //         PrometheusRequestBody::HashMap(self.config.exporters_map()),
+                //     ),
+                // ]);
                 self.client.post(endpoint).json(&body).send().await?
             };
 
@@ -627,16 +701,13 @@ pub mod run {
                         let endpoint = format!(
                             "http://{}/experiment/{}/setup",
                             self.config.metric_server(),
-                            experiment.id
+                            experiment.id()
                         );
-                        let body = HashMap::from([
-                            (
-                                "experimentId",
-                                DbSaveRequestBody::String(experiment.id.clone()),
-                            ),
-                            ("runner", DbSaveRequestBody::String(runner.to_string())),
-                            ("commands", DbSaveRequestBody::Commands(commands)),
-                        ]);
+                        let body = json!({
+                            "experimentId": *experiment.id(),
+                            "runner": runner,
+                            "commands": commands
+                        });
                         self.client.post(endpoint).json(&body).send().await?
                     };
                     response.error_for_status_ref();
@@ -654,7 +725,9 @@ pub mod run {
         ) -> reqwest::Result<()> {
             let response = {
                 let endpoint = format!("http://{}/exec", runner);
-                let body = HashMap::from([("commands", commands)]);
+                let body = json!({
+                    "commands": commands
+                });
                 self.client.post(endpoint).json(&body).send().await?
             };
 

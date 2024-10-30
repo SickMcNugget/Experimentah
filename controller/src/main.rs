@@ -6,6 +6,7 @@ use toml;
 use clap::Parser;
 
 use controller::parse::{Config, Experiment, ExperimentConfig};
+use controller::run::ExperimentRunner;
 
 use reqwest::Client;
 
@@ -41,26 +42,28 @@ async fn main() {
     let client = Client::builder()
         .timeout(timeout)
         .build()
-        .expect("Somehow, and invalid client was built");
+        .expect("Somehow an invalid client was built");
 
-    if let Err(e) = check_metrics_api(&client, &config.metric_server()).await {
+    let er = ExperimentRunner::build(config, experiment_config, client)
+        .expect("Error creating ExperimentRunner");
+
+    if let Err(e) = er.check_metrics_api().await {
         panic!("{e}")
     }
 
-    if let Err(e) = check_runners(&client, &config.runners()).await {
+    if let Err(e) = er.check_runners().await {
         panic!("{e}")
     }
 
-    let runs: u16 = experiment_config.runs();
+    let runs: u16 = er.experiment_config().runs();
     println!("= Running Experiment {}=", runs);
 
     for i in 0..runs {
-        
-        
+        er.run_experiments();
     }
 
     println!("\n= Successful Experiments =");
-    println!("{}", )
+    // println!("{}",)
 
     // Need to validate host endpoints in the jobs for each experiment
     //  This requires comparing against config
@@ -83,56 +86,56 @@ async fn main() {
 //     }
 // }
 
-fn run_experiment(
-    experiment: &Experiment,
-    client: &Client,
-    experiment_config: &ExperimentConfig,
-    config: &Config,
-) -> Result<Vec<String>, String> {
-    let experiment_id = create_experiment(experiment, client, &config.metric_server());
-    exporters_mapping = configure_prometheus(experiment_id, config);
-
-    Ok(vec!["ligma".to_string()])
-}
-
-async fn create_experiment(
-    experiment: &Experiment,
-    client: &Client,
-    url: &String,
-) -> reqwest::Result<String> {
-    let endpoint = format!("http://{}/experiment", url);
-
-    let response = {
-        let now = get_time();
-        let body = HashMap::from([("name", experiment.name()), ("timestamp_ms", &now)]);
-        client.post(endpoint).json(&body).send().await?
-    };
-
-    response.error_for_status_ref()?;
-    let ret = response.json().await?;
-    Ok(ret)
-}
-
-fn configure_prometheus(experiment_id: String, config: &Config, url: &String) -> HashMap<&str, String> {
-    let endpoint = format!("http://{}/prometheus", url);
-    
-
-
-
-    let response = {
-        let body = config
-        
-    }
-}
-
-fn get_time() -> String {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("Time went backwards")
-        .as_millis()
-        .to_string()
-}
-
+// fn run_experiment(
+//     experiment: &Experiment,
+//     client: &Client,
+//     experiment_config: &ExperimentConfig,
+//     config: &Config,
+// ) -> Result<Vec<String>, String> {
+//     let experiment_id = create_experiment(experiment, client, &config.metric_server());
+//     exporters_mapping = configure_prometheus(experiment_id, config);
+//
+//     Ok(vec!["ligma".to_string()])
+// }
+//
+// async fn create_experiment(
+//     experiment: &Experiment,
+//     client: &Client,
+//     url: &String,
+// ) -> reqwest::Result<String> {
+//     let endpoint = format!("http://{}/experiment", url);
+//
+//     let response = {
+//         let now = get_time();
+//         let body = HashMap::from([("name", experiment.name()), ("timestamp_ms", &now)]);
+//         client.post(endpoint).json(&body).send().await?
+//     };
+//
+//     response.error_for_status_ref()?;
+//     let ret = response.json().await?;
+//     Ok(ret)
+// }
+//
+// fn configure_prometheus(experiment_id: String, config: &Config, url: &String) -> HashMap<&str, String> {
+//     let endpoint = format!("http://{}/prometheus", url);
+//
+//
+//
+//
+//     let response = {
+//         let body = config
+//
+//     }
+// }
+//
+// fn get_time() -> String {
+//     std::time::SystemTime::now()
+//         .duration_since(std::time::UNIX_EPOCH)
+//         .expect("Time went backwards")
+//         .as_millis()
+//         .to_string()
+// }
+//
 async fn check_metrics_api(client: &Client, url: &String) -> reqwest::Result<()> {
     let endpoint = format!("http://{}/status", url);
     let response = client.get(endpoint).send().await?; // .await?;
