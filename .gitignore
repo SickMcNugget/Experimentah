@@ -1,3 +1,4 @@
 /target
 node_modules/
 *.png
+metrics-api/docker/data/
