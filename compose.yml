@@ -1,0 +1,10 @@
+name: experimentah
+
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - 9090:9090
+    volumes:
+      - ./data/prometheus:/prometheus/data/
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml
