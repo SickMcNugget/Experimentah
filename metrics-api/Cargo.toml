@@ -4,7 +4,8 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-axum = "0.7.5"
+# axum = "0.7.5"
 tokio = { workspace = true }
-tower = "0.4.13"
+# tower = "0.4.13"
 reqwest = { workspace = true }
+actix-web = "4"
