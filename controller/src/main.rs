@@ -58,8 +58,9 @@ async fn main() {
     let runs: u16 = er.experiment_config().runs();
     println!("= Running Experiment {}=", runs);
 
-    for i in 0..runs {
-        er.run_experiments();
+    for _ in 0..runs {
+        let successful_experiments = er.run_experiments().await;
+        dbg!("{:?}", successful_experiments.unwrap());
     }
 
     println!("\n= Successful Experiments =");

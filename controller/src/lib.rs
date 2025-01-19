@@ -484,7 +484,7 @@ pub mod run {
         experiment_config: ExperimentConfig,
 
         client: Client,
-        rt: tokio::runtime::Runtime,
+        // rt: tokio::runtime::Runtime,
     }
 
     impl ExperimentRunner {
@@ -497,9 +497,9 @@ pub mod run {
                 config,
                 experiment_config,
                 client,
-                rt: tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()?,
+                // rt: tokio::runtime::Builder::new_current_thread()
+                //     .enable_all()
+                //     .build()?,
             })
         }
 
@@ -520,35 +520,34 @@ pub mod run {
         //     }
         // }
 
-        pub fn run_experiments(&self) -> Result<Vec<String>, String> {
-            let successful_experiments = Vec::new();
+        pub async fn run_experiments(&self) -> Result<Vec<String>, Box<dyn Error>> {
+            let mut successful_experiments = Vec::new();
 
             for experiment in self.experiment_config.experiments().iter() {
-                self.run_experiment(experiment);
+                self.run_experiment(experiment).await?;
+                successful_experiments.push(experiment.id().clone());
             }
 
             Ok(successful_experiments)
         }
 
-        fn run_experiment(&self, experiment: &Experiment) -> Result<String, Box<dyn Error>> {
-            {
-                let experiment_id = self.rt.block_on(self.create_experiment(experiment))?;
-                experiment.allocate_id(experiment_id)?;
-            }
+        async fn run_experiment(&self, experiment: &Experiment) -> Result<(), Box<dyn Error>> {
+            let experiment_id = self.create_experiment(experiment).await?;
+            experiment.allocate_id(experiment_id)?;
 
-            let exporters_mapping = self.rt.block_on(self.configure_prometheus(experiment))?;
+            let exporters_mapping = self.configure_prometheus(experiment).await?;
             // TODO(joren): add wait for prometheus ready
 
-            self.rt.block_on(self.experiment_setup(experiment))?;
+            self.experiment_setup(experiment).await?;
 
             let mut job_ids = Vec::new();
             for job in experiment.jobs().iter() {
-                let job_id = self.rt.block_on(self.run_job(job, experiment));
+                let job_id = self.run_job(job, experiment).await;
                 job_ids.push(job_id);
             }
 
             // exporters_mapping = self.configure_prometheus(experiment_id);
-            Ok("yes!".to_string())
+            Ok(())
         }
 
         pub async fn check_metrics_api(&self) -> reqwest::Result<()> {
@@ -560,7 +559,7 @@ pub mod run {
 
         pub async fn check_runners(&self) -> reqwest::Result<()> {
             for url in self.config.runners().iter() {
-                let endpoint = format!("http://{}/status", url);
+                let endpoint = format!("http://{}/job", url);
                 let response = self.client.get(endpoint).send().await?;
                 response.error_for_status()?;
             }
@@ -635,9 +634,9 @@ pub mod run {
             Ok(())
         }
 
-        async fn run_job(&self, job: &Job, experiment: &Experiment) {
-            let job_id = self.create_job(job, experiment).await.unwrap();
-            self.start_job(&job_id, job, experiment);
+        async fn run_job(&self, job: &Job, experiment: &Experiment) -> reqwest::Result<()> {
+            let job_id = self.create_job(job, experiment).await?;
+            self.start_job(&job_id, job, experiment).await
         }
         // fn update_experiment(&self, experiment: &mut Experiment) {}
 
@@ -692,10 +691,10 @@ pub mod run {
         async fn experiment_setup(&self, experiment: &Experiment) -> Result<(), Box<dyn Error>> {
             for setup in experiment.setup().iter() {
                 for runner in self.config.runners().iter() {
-                    self.default_setup_tasks(runner);
+                    self.default_setup_tasks(runner).await?;
 
                     let commands = setup.commands()?;
-                    self.custom_setup_tasks(runner, &commands);
+                    self.custom_setup_tasks(runner, &commands).await?;
 
                     let response = {
                         let endpoint = format!(
@@ -710,8 +709,8 @@ pub mod run {
                         });
                         self.client.post(endpoint).json(&body).send().await?
                     };
-                    response.error_for_status_ref();
-                    let ret = response.json().await?;
+                    response.error_for_status_ref()?;
+                    response.json().await?;
                 }
             }
             Ok(())
