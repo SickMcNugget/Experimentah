@@ -1,4 +1,6 @@
-pub mod mongo {}
+// pub mod mongo {}
+pub mod models;
+pub mod schema;
 
 pub mod prometheus {
     use std::{

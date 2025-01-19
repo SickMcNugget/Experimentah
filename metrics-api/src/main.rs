@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     env,
     ffi::OsString,
     fs::read_dir,
@@ -8,6 +9,7 @@ use std::{
 };
 
 use actix_web::{get, post, web, App, HttpResponse, HttpServer, Responder};
+use metrics_api::models::*;
 
 // use axum::{
 //     http::StatusCode,
@@ -15,21 +17,40 @@ use actix_web::{get, post, web, App, HttpResponse, HttpServer, Responder};
 //     Router,
 // };
 
+use diesel::{prelude::*, query_dsl::methods::SelectDsl};
+
+use dotenvy::dotenv;
 use reqwest;
 
 // use tower_http::services::ServeDir;
+fn connect_to_postgres() -> PgConnection {
+    let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    PgConnection::establish(&database_url)
+        .unwrap_or_else(|_| panic!("Error connecting to {}", database_url))
+}
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    HttpServer::new(|| App::new()
-        .service(status)
-        .service(prometheus_reset)
-        .service(prometheus_status)
-        .service(prometheus_configure)
-        .service(prometheus_get)
-        .bind(("127.0.0.1", 8080))?
+    use metrics_api::schema::experiments::dsl::*;
+
+    dotenv().ok();
+    let conn = &mut connect_to_postgres();
+
+    let results = experiments
+        .limit(5)
+        .select(Experiment::as_select())
+        .load(conn)
+        .expect("Error loading experiments");
+    println!("Displaying {} experiments", results.len());
+
+    HttpServer::new(|| App::new().service(status))
+        .bind(("127.0.0.1", 50000))?
         .run()
         .await
+    // .service(prometheus_reset)
+    // .service(prometheus_status)
+    // .service(prometheus_configure)
+    // .service(prometheus_get)
 }
 //
 // async fn serve(name: &str, app: Router, port: u16) {
@@ -96,6 +117,7 @@ async fn main() -> std::io::Result<()> {
 //     )
 // }
 //
+#[get("/status")]
 async fn status() -> impl Responder {
     let client = reqwest::Client::new();
 
@@ -117,34 +139,37 @@ async fn status() -> impl Responder {
     "yes"
 }
 
-#[get("/prometheus")]
-async fn prometheus_status() {}
-
-#[post("/prometheus/configure")]
-async fn prometheus_configure() {}
-
-#[post("/prometheus/reset")]
-async fn prometheus_reset() {}
-
-#[get("/prometheus/{exporter_id}")]
-async fn prometheus_get(exporter_id: web::Path<String>) -> impl Responder {
-    "Ligma"
-}
-
-#[post("/experiment")]
-async fn experiment_create() {}
-// async fn experiment_setup() {}
-// async fn experiment_teardown() {}
-#[get("/experiment/{experiment_id}")]
-async fn experiment_get(experiment_id: web::Path<String>) {}
-
-#[post("/job")]
-async fn job_create() {}
-#[post("/job/start")]
-async fn job_start() {}
-#[post("/job/complete")]
-async fn job_complete() {}
-#[post("/job/fail")]
-async fn job_failed() {}
-#[get("/job/{job_id}")]
-async fn job_status(job_id: web::Path<String>) {}
+// #[get("/prometheus")]
+// async fn prometheus_status() {}
+//
+// #[post("/prometheus/configure")]
+// async fn prometheus_configure() {}
+//
+// #[post("/prometheus/reset")]
+// async fn prometheus_reset() {}
+//
+// #[get("/prometheus/{exporter_id}")]
+// async fn prometheus_get(exporter_id: web::Path<String>) -> impl Responder {
+//     "Ligma"
+// }
+//
+// #[post("/experiment")]
+// async fn experiment_create() {
+//     // POSTGRES Create experiment
+//     //
+// }
+// // async fn experiment_setup() {}
+// // async fn experiment_teardown() {}
+// #[get("/experiment/{experiment_id}")]
+// async fn experiment_get(experiment_id: web::Path<String>) {}
+//
+// #[post("/job")]
+// async fn job_create() {}
+// #[post("/job/start")]
+// async fn job_start() {}
+// #[post("/job/complete")]
+// async fn job_complete() {}
+// #[post("/job/fail")]
+// async fn job_failed() {}
+// #[get("/job/{job_id}")]
+// async fn job_status(job_id: web::Path<String>) {}

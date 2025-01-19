@@ -1,9 +1,9 @@
 services:
   prep_container:
     image: busybox:latest
-    command: "./prep.sh"
+    command: "/prep.sh"
     volumes:
-      - ./data:/data
+      - ./data:/data/
       - ./prep.sh:/prep.sh
   postgres:
     image: postgres:alpine
@@ -14,6 +14,8 @@ services:
     volumes:
       # - db-data:/var/lib/postgresql/data
       - ./data/postgres/:/var/lib/postgresql/data
+    ports:
+      - 5432:5432
     #volumes:
     #  - type: tmpfs
     #    target: /dev/shm
