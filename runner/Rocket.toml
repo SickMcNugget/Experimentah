@@ -1,0 +1,5 @@
+[default]
+address = "127.0.0.1"
+port = 50001
+metrics_api_endpoint = "127.0.0.1:50000"
+workload_repository_endpoint = "127.0.0.1:5001"

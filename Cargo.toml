@@ -1,5 +1,5 @@
 [workspace]
-members = ["controller", "metrics-api"]
+members = ["controller", "metrics-api", "runner"]
 resolver = "2"
 
 # [package]

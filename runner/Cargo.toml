@@ -1,0 +1,12 @@
+[package]
+name = "runner"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rocket = { version = "0.5.1", features = ["json"] }
+serde.workspace = true
+tokio.workspace = true
+reqwest.workspace = true
+regex = { version = "1.10.5" }
+toml.workspace = true
