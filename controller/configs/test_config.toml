@@ -1,7 +1,3 @@
-[metrics_api]
-host = "host1"
-port = 50000
-
 [[hosts]]
 name = "host1"
 address = "my-host.com"
@@ -10,6 +6,10 @@ infrastructure = "linux"
 [[hosts]]
 name = "host2"
 address = "my-host2.com"
+
+[brain]
+host = "host1"
+port = 50000
 
 [[runners]]
 name = "runner1"
@@ -24,11 +24,14 @@ port = 2001
 [[exporters]]
 name = "test-exporter"
 host = "host1"
-port = 9100
+# port = 9100
+command = "sar -o collection.bin"
+setup = ["dnf install -y sysstat", "apt install -y sysstat"]
 kind = "node"
 
 [[exporters]]
 name = "other-exporter"
 host = "host2"
 port = 9101
+command = "python"
 kind = "temperature"

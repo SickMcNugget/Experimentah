@@ -1,16 +1,29 @@
-use std::collections::HashMap;
+// Written by Joren Regan
+// Date: 2025-06-13
+//
+// This is the client-side portion of the Experimentah system.
+// Two threads are at play (once validation has succeeded and the system is ready):
+// 1. The experiment running thread. Tells the runner what to do and waits until it's done.
+// 2. The heartbeat thread. Ensures that endpoints continue to be reachable. If they aren't,
+// after a time delay, notifies the main thread which then:
+//  a. Tries to shut down the runner, collecting whatever results may exist.
+//  b. Tries to upload collected results (if the error was with repo node)
+//  c. Dies
+
+use std::env;
 use std::path::PathBuf;
-use std::{env, fs};
-use toml;
+use std::sync::Arc;
 
 use clap::Parser;
 
-use controller::parse::{Config, Experiment, ExperimentConfig};
+use controller::parse::{Config, ExperimentConfig};
 use controller::run::ExperimentRunner;
 
-use reqwest::Client;
+use reqwest::{Client, StatusCode};
 
 use std::time::Duration;
+
+const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(5000);
 
 #[tokio::main]
 async fn main() {
@@ -18,49 +31,72 @@ async fn main() {
 
     let timeout = Duration::from_secs(args.timeout);
 
-    let config: Config = {
-        let config_str = fs::read_to_string(args.config).expect("Unable to read config file");
-        toml::from_str(&config_str).expect("Unable to parse config toml")
-    };
-    let experiment_config: ExperimentConfig = {
-        let experiment_config_str = fs::read_to_string(args.experiment_config)
-            .expect("Unable to read experiment config file");
-        toml::from_str(&experiment_config_str).expect("Unable to parse experiment config toml")
+    let config: Arc<Config> = match Config::from_toml(&args.config) {
+        Ok(config) => Arc::new(config),
+        Err(e) => panic!("{e}"),
     };
 
-    if let Err(e) = ExperimentConfig::validate(&experiment_config, &config) {
-        panic!("{e}");
-    }
+    println!(
+        "Successfully parsed and validated config: {:?}",
+        &args.config
+    );
+
+    let experiment_config: Arc<ExperimentConfig> =
+        match ExperimentConfig::from_toml(
+            &args.experiment_config,
+            config.as_ref(),
+        ) {
+            Ok(experiment_config) => Arc::new(experiment_config),
+            Err(e) => panic!("{e}"),
+        };
+
+    println!(
+        "Successfully parsed and validated experiment config: {:?}",
+        &args.experiment_config
+    );
 
     println!("Logging to file: {:?}", args.log_file);
 
-    println!(
-        "--- Config ---\n{:#?}\n--- Experiment Config ---\n{:#?}",
-        config, experiment_config
+    let client = Arc::new(
+        Client::builder()
+            .timeout(timeout)
+            .build()
+            .expect("Somehow an invalid client was built"),
     );
 
-    let client = Client::builder()
-        .timeout(timeout)
-        .build()
-        .expect("Somehow an invalid client was built");
+    let er = ExperimentRunner::new(
+        config.as_ref(),
+        experiment_config.as_ref(),
+        client.clone(),
+    );
 
-    let er = ExperimentRunner::build(config, experiment_config, client)
-        .expect("Error creating ExperimentRunner");
+    // I think that I want the controller to ensure that runners are available on the hosts they're
+    // meant to be on.
+    // I want the runner to ensure that exporters are working as expected, though, meaning that
+    // an endpoint needs to be added to the runner which allows an exporter to be registered (and
+    // subsequently monitored) by that runner. Exporters will be programs that are run in the
+    // background during the execution of a run. We'll use and advisory lock to make sure that
+    // multiple instances of the exporter program are not created, and that they're properly killed
+    // at the end of a run. I think the expectation at this point is that an exporter should be a
+    // long-running process which outputs it's data to a file. It's the responsibility of the
+    // exporter itself to include timestamp information and do all the heavy lifting regarding
+    // metrics collection.
+    // Think tools like sar, and raritan (my bespoke power usage script).
 
-    if let Err(e) = er.check_metrics_api().await {
-        panic!("{e}")
-    }
+    // TODO(joren): In the future, it may be better to only prepare runners for the experiment
+    // that's about to be run. For now, I'd like to do everything at the beginning, though.
+    println!("Ensuring all runners are up and reachable");
+    er.prep_runners().await;
 
-    if let Err(e) = er.check_runners().await {
-        panic!("{e}")
-    }
+    tokio::spawn(async move { heartbeat_thread(client, config) });
 
-    let runs: u16 = er.experiment_config().runs();
+    let runs = &experiment_config.runs;
     println!("= Running Experiment {}=", runs);
 
-    for _ in 0..runs {
-        let successful_experiments = er.run_experiments().await;
-        dbg!("{:?}", successful_experiments.unwrap());
+    for _ in 0..*runs {
+        // er.
+        // let successful_experiments = er.run_experiments().await;
+        // dbg!("{:?}", successful_experiments.unwrap());
     }
 
     println!("\n= Successful Experiments =");
@@ -79,6 +115,49 @@ async fn main() {
     //
     // Run job (by contacting the runner)
     //  Post results of job and run next one until finished
+}
+
+// Runs periodically and determines service connectivity
+async fn heartbeat_thread(client: Arc<Client>, config: Arc<Config>) {
+    loop {
+        let brain_promise = client
+            .get(format!("{}/status", config.brain_endpoint()))
+            .send();
+
+        let mut runner_promises = Vec::with_capacity(config.runners.len());
+        for runner in config.runner_endpoints() {
+            runner_promises
+                .push(client.get(format!("{}/status", runner)).send());
+        }
+
+        match brain_promise.await {
+            Ok(response) => match response.status() {
+                StatusCode::OK => {}
+                _ => eprintln!(
+                    "Bad status code from brain: {}",
+                    response.status()
+                ),
+            },
+            Err(..) => {
+                eprintln!("Error awaiting brain");
+            }
+        }
+        for runner_promise in runner_promises {
+            match runner_promise.await {
+                Ok(response) => match response.status() {
+                    StatusCode::OK => {}
+                    _ => eprintln!(
+                        "Bad status code from runner: {}",
+                        response.status()
+                    ),
+                },
+                Err(..) => {
+                    eprintln!("Error awaiting runner");
+                }
+            }
+        }
+        tokio::time::sleep(HEARTBEAT_INTERVAL).await;
+    }
 }
 
 // fn run_all(client: &Client, experiment_config: &ExperimentConfig, config: &Config) {
@@ -137,22 +216,6 @@ async fn main() {
 //         .to_string()
 // }
 //
-async fn check_metrics_api(client: &Client, url: &String) -> reqwest::Result<()> {
-    let endpoint = format!("http://{}/status", url);
-    let response = client.get(endpoint).send().await?; // .await?;
-    response.error_for_status()?;
-    Ok(())
-}
-
-async fn check_runners(client: &Client, urls: &Vec<String>) -> reqwest::Result<()> {
-    for url in urls.iter() {
-        let endpoint = format!("http://{}/status", url);
-        let response = client.get(endpoint).send().await?;
-        response.error_for_status()?;
-    }
-    Ok(())
-}
-
 fn default_log_file() -> PathBuf {
     let mut path = env::current_exe().unwrap();
     path.pop();
@@ -168,7 +231,9 @@ fn default_log_file() -> PathBuf {
 #[derive(Parser, Debug)]
 #[command(name = "Controller")]
 #[command(version = "0.0.1")]
-#[command(about = "Allows a user to run experiments using defined configs/experiment configs")]
+#[command(
+    about = "Allows a user to run experiments using defined configs/experiment configs"
+)]
 #[command(long_about = None)]
 struct Args {
     /// The config file storing global configuration
@@ -208,11 +273,12 @@ mod tests {
             .build()
             .unwrap();
 
-        assert!(
-            check_metrics_api(&client, &"http://localhost:50000".to_string())
-                .await
-                .is_err()
-        );
+        assert!(check_metrics_api(
+            &client,
+            &"http://localhost:50000".to_string()
+        )
+        .await
+        .is_err());
 
         assert!(check_runners(
             &client,

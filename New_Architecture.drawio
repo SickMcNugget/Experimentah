@@ -1,0 +1,136 @@
+<mxfile host="app.diagrams.net" agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:139.0) Gecko/20100101 Firefox/139.0" version="27.1.5">
+  <diagram name="Page-1" id="yJfNnz3G1z0wKyAGFfoL">
+    <mxGraphModel dx="2916" dy="2219" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="850" pageHeight="1100" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="lsW1dJihJSENQzayv1aU-31" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" edge="1" parent="1" source="lsW1dJihJSENQzayv1aU-1" target="lsW1dJihJSENQzayv1aU-29">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="lsW1dJihJSENQzayv1aU-65" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;entryX=0.5;entryY=0;entryDx=0;entryDy=0;dashed=1;" edge="1" parent="1" source="lsW1dJihJSENQzayv1aU-1" target="lsW1dJihJSENQzayv1aU-4">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="lsW1dJihJSENQzayv1aU-66" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;entryX=0.5;entryY=0;entryDx=0;entryDy=0;dashed=1;" edge="1" parent="1" source="lsW1dJihJSENQzayv1aU-1" target="lsW1dJihJSENQzayv1aU-6">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="lsW1dJihJSENQzayv1aU-67" value="&lt;div&gt;1. Initiate run, test connectivity,&amp;nbsp;&lt;/div&gt;&lt;div&gt;synchronise runner and repository,&lt;/div&gt;&lt;div&gt;heartbeat thread.&lt;/div&gt;" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];" vertex="1" connectable="0" parent="lsW1dJihJSENQzayv1aU-66">
+          <mxGeometry x="-0.4348" relative="1" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="lsW1dJihJSENQzayv1aU-1" value="Local Machine" style="rounded=0;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="370" y="80" width="100" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="lsW1dJihJSENQzayv1aU-45" style="rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=0;exitY=1;exitDx=0;exitDy=0;" edge="1" parent="1" source="lsW1dJihJSENQzayv1aU-4" target="lsW1dJihJSENQzayv1aU-10">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="lsW1dJihJSENQzayv1aU-46" style="rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" edge="1" parent="1" source="lsW1dJihJSENQzayv1aU-4" target="lsW1dJihJSENQzayv1aU-11">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="lsW1dJihJSENQzayv1aU-4" value="Repository Node" style="rounded=0;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="270" y="310" width="100" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="lsW1dJihJSENQzayv1aU-51" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" edge="1" parent="1" source="lsW1dJihJSENQzayv1aU-6" target="lsW1dJihJSENQzayv1aU-18">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="lsW1dJihJSENQzayv1aU-63" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;dashed=1;" edge="1" parent="1" source="lsW1dJihJSENQzayv1aU-6" target="lsW1dJihJSENQzayv1aU-4">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="420" y="360" />
+              <mxPoint x="420" y="360" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="lsW1dJihJSENQzayv1aU-64" value="&lt;div&gt;3. Return&amp;nbsp;&lt;/div&gt;&lt;div&gt;results if&lt;/div&gt;&lt;div&gt;possible&lt;/div&gt;" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];" vertex="1" connectable="0" parent="lsW1dJihJSENQzayv1aU-63">
+          <mxGeometry x="0.1209" y="1" relative="1" as="geometry">
+            <mxPoint x="6" y="-1" as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="lsW1dJihJSENQzayv1aU-6" value="&lt;div&gt;Runner Node&lt;/div&gt;&lt;div&gt;&lt;br&gt;&lt;/div&gt;&lt;div&gt;2. Run&amp;nbsp;&lt;/div&gt;&lt;div&gt;experiment&lt;/div&gt;" style="rounded=0;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="470" y="310" width="100" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="lsW1dJihJSENQzayv1aU-49" style="rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" edge="1" parent="1" source="lsW1dJihJSENQzayv1aU-7" target="lsW1dJihJSENQzayv1aU-25">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="lsW1dJihJSENQzayv1aU-50" style="rounded=0;orthogonalLoop=1;jettySize=auto;html=1;elbow=vertical;" edge="1" parent="1" source="lsW1dJihJSENQzayv1aU-7" target="lsW1dJihJSENQzayv1aU-28">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="lsW1dJihJSENQzayv1aU-7" value="Worker Node" style="rounded=0;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="600" y="410" width="100" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="lsW1dJihJSENQzayv1aU-47" style="rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" edge="1" parent="1" source="lsW1dJihJSENQzayv1aU-8" target="lsW1dJihJSENQzayv1aU-26">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="lsW1dJihJSENQzayv1aU-48" style="rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" edge="1" parent="1" source="lsW1dJihJSENQzayv1aU-8" target="lsW1dJihJSENQzayv1aU-27">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="lsW1dJihJSENQzayv1aU-8" value="Worker Node" style="rounded=0;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="600" y="210" width="100" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="lsW1dJihJSENQzayv1aU-10" value="MongoDB" style="ellipse;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="170" y="440" width="80" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="lsW1dJihJSENQzayv1aU-11" value="Workload Repository (HTTP Fileserver)" style="ellipse;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="280" y="440" width="80" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="lsW1dJihJSENQzayv1aU-18" value="Runner" style="ellipse;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="480" y="440" width="80" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="lsW1dJihJSENQzayv1aU-20" value="Custom Test Script" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="285" y="560" width="70" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="lsW1dJihJSENQzayv1aU-24" value="" style="group" vertex="1" connectable="0" parent="1">
+          <mxGeometry x="160" y="80" width="170" height="87" as="geometry" />
+        </mxCell>
+        <mxCell id="lsW1dJihJSENQzayv1aU-17" value="" style="group" vertex="1" connectable="0" parent="lsW1dJihJSENQzayv1aU-24">
+          <mxGeometry width="130" height="67" as="geometry" />
+        </mxCell>
+        <mxCell id="lsW1dJihJSENQzayv1aU-12" value="&lt;div&gt;&lt;u&gt;Legend&lt;/u&gt;&lt;/div&gt;&lt;div&gt;&lt;u&gt;&lt;br&gt;&lt;/u&gt;&lt;/div&gt;" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;" vertex="1" parent="lsW1dJihJSENQzayv1aU-17">
+          <mxGeometry width="60" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="lsW1dJihJSENQzayv1aU-13" value="" style="ellipse;whiteSpace=wrap;html=1;aspect=fixed;" vertex="1" parent="lsW1dJihJSENQzayv1aU-17">
+          <mxGeometry x="10" y="27" width="10" height="10" as="geometry" />
+        </mxCell>
+        <mxCell id="lsW1dJihJSENQzayv1aU-14" value="Software" style="text;html=1;align=left;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;" vertex="1" parent="lsW1dJihJSENQzayv1aU-17">
+          <mxGeometry x="30" y="17" width="70" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="lsW1dJihJSENQzayv1aU-15" value="" style="rounded=0;whiteSpace=wrap;html=1;" vertex="1" parent="lsW1dJihJSENQzayv1aU-17">
+          <mxGeometry x="10" y="47" width="10" height="10" as="geometry" />
+        </mxCell>
+        <mxCell id="lsW1dJihJSENQzayv1aU-16" value="Physical Node" style="text;html=1;align=left;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;" vertex="1" parent="lsW1dJihJSENQzayv1aU-17">
+          <mxGeometry x="30" y="37" width="100" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="lsW1dJihJSENQzayv1aU-22" value="" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="lsW1dJihJSENQzayv1aU-24">
+          <mxGeometry x="10" y="67" width="10" height="10" as="geometry" />
+        </mxCell>
+        <mxCell id="lsW1dJihJSENQzayv1aU-23" value="Software Component" style="text;html=1;align=left;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;" vertex="1" parent="lsW1dJihJSENQzayv1aU-24">
+          <mxGeometry x="30" y="57" width="140" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="lsW1dJihJSENQzayv1aU-25" value="&lt;div&gt;System Exporter&lt;/div&gt;" style="ellipse;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="720" y="390" width="60" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="lsW1dJihJSENQzayv1aU-26" value="&lt;div&gt;System Exporter&lt;/div&gt;" style="ellipse;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="720" y="190" width="60" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="lsW1dJihJSENQzayv1aU-27" value="&lt;div&gt;Power&lt;/div&gt;&lt;div&gt;Exporter&lt;/div&gt;" style="ellipse;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="720" y="270" width="60" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="lsW1dJihJSENQzayv1aU-28" value="&lt;div&gt;Power&lt;/div&gt;&lt;div&gt;Exporter&lt;/div&gt;" style="ellipse;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="720" y="470" width="60" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="lsW1dJihJSENQzayv1aU-29" value="Controller" style="ellipse;whiteSpace=wrap;html=1;aspect=fixed;" vertex="1" parent="1">
+          <mxGeometry x="520" y="90" width="80" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="lsW1dJihJSENQzayv1aU-37" value="&lt;div&gt;The repository node should have plenty of storage.&amp;nbsp;&lt;/div&gt;&lt;div&gt;The results of various test runs should be stored on this node.&lt;/div&gt;&lt;div&gt;&lt;br&gt;&lt;/div&gt;&lt;div&gt;We expect that metrics are collected on each node running an experiment. The metrics should be collected into files which contain timestamp information for later processing. Run outputs and other metrics are saved on the file system and a reference is written into the MongoDB database.&lt;/div&gt;" style="text;html=1;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;" vertex="1" parent="1">
+          <mxGeometry x="-130" y="290" width="300" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="lsW1dJihJSENQzayv1aU-40" value="&lt;div&gt;The runner is responsible for running test code, and saving result files at the end of an experiment. It will forward these results over to the repository node unless it goes down. If it does go down, the runner checks for a few minutes before giving up and ending the run (the success of a run does not depend upon the connectivity of the repository node).&lt;/div&gt;&lt;div&gt;&lt;br&gt;&lt;/div&gt;&lt;div&gt;Each experiment run generates a new folder with that experiment&#39;s ID. This folder will contain the direct output from the experiment, as well as export data collected during the course of the run.&lt;/div&gt;" style="text;html=1;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;" vertex="1" parent="1">
+          <mxGeometry x="420" y="550" width="290" height="190" as="geometry" />
+        </mxCell>
+        <mxCell id="lsW1dJihJSENQzayv1aU-52" value="&lt;div&gt;The controller is the core of the architecture. It is responsible for initiating runs. Part of this process is sending the runner component over to the runner node of choice (if it isn&#39;t already present) and running the program (if it isn&#39;t already running). The controller will then monitor the runner for the rest of the experiment. If the runner goes down, then the controller attempts a reconnect for some time, and then assumes a failure.&lt;/div&gt;&lt;div&gt;&lt;br&gt;&lt;/div&gt;&lt;div&gt;The controller also monitors the Repository node for any uptime problems. If, for some reason the repository node services go down during a run, and aren&#39;t back up by the end of the run, then the controller will hold onto the run results until the services come back up.&lt;/div&gt;&lt;div&gt;&lt;br&gt;&lt;/div&gt;&lt;div&gt;The controller should also contain experiment YAMLs and config files describing the server addresses for different components in the system.&lt;/div&gt;&lt;div&gt;&lt;br&gt;&lt;/div&gt;&lt;div&gt;Experiment YAMLs describe the experiment to be run, including script that need to be executed, the number of retries, and useful metadata to be stored after an experiment completes.&lt;/div&gt;&lt;div&gt;&lt;br&gt;&lt;/div&gt;&lt;div&gt;The controller can be run as either a CLI tool or a web dashboard.&lt;/div&gt;" style="text;html=1;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;" vertex="1" parent="1">
+          <mxGeometry x="630" y="-80" width="540" height="250" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

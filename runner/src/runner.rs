@@ -69,16 +69,13 @@ pub struct Runner {
     waiting_jobs: Mutex<u32>,
     running: bool,
     client: reqwest::Client,
-    metrics_api_endpoint: String,
-    workload_repository_endpoint: String,
+    brain_endpoint: String,
+    // workload_repository_endpoint: String,
     job_regex: Regex,
 }
 
 impl Runner {
-    pub fn new(
-        metrics_api_endpoint: String,
-        workload_repository_endpoint: String,
-    ) -> (Self, Sender<Job>) {
+    pub fn new(brain_endpoint: String) -> (Self, Sender<Job>) {
         let (sender, receiver) = mpsc::channel();
         let runner = Runner {
             job_queue: Mutex::new(receiver),
@@ -86,8 +83,7 @@ impl Runner {
             waiting_jobs: Mutex::new(0),
             running: true,
             client: Client::new(),
-            metrics_api_endpoint,
-            workload_repository_endpoint,
+            brain_endpoint,
             job_regex: Regex::new(r"%%%%%\nworkload_output:@@@@@(?<workload_output>.+?)@@@@@\nstart_time_unix:@@@@@(?<start_time_unix>\d+)@@@@@\nend_time_unix:@@@@@(?<end_time_unix>\d+)@@@@@\n%%%%%").unwrap(),
         };
 
@@ -166,7 +162,7 @@ impl Runner {
     //     }
     // }
 
-    async fn metrics_api_request<T>(
+    async fn brain_request<T>(
         &self,
         request_type: &str,
         job: &Job,
@@ -179,7 +175,7 @@ impl Runner {
             .client
             .post(format!(
                 "http://{}/experiment/{}/job/{}/{}",
-                self.metrics_api_endpoint, job.experiment_id, job.job_id, request_type
+                self.brain_endpoint, job.experiment_id, job.job_id, request_type
             ))
             .json(&body)
             .send()
@@ -188,7 +184,7 @@ impl Runner {
         if !response.status().is_success() {
             return Err(RunnerError::new(format!(
                 "Unable to contact metrics api: {}\nreason: {}",
-                self.metrics_api_endpoint,
+                self.brain_endpoint,
                 response.text().await?
             )));
         }
@@ -204,7 +200,7 @@ impl Runner {
 
         println!("[LOG] Reporting job start");
         let map = HashMap::from([("runnerTimestampMs", self.get_time())]);
-        self.metrics_api_request("start", job, map).await?;
+        self.brain_request("start", job, map).await?;
 
         let mut command = self.build_exec_command(job);
 
@@ -217,7 +213,7 @@ impl Runner {
                     ("reason", e.to_string()),
                     ("runnerTimestampMs", self.get_time()),
                 ]);
-                let response = self.metrics_api_request("error", job, body).await?;
+                let response = self.brain_request("error", job, body).await?;
 
                 // If we got this far, we have an error
                 return Err(RunnerError::new(format!(

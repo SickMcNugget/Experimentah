@@ -4,9 +4,12 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-rocket = { version = "0.5.1", features = ["json"] }
+axum = { version = "0.8" }
 serde.workspace = true
 tokio.workspace = true
 reqwest.workspace = true
 regex = { version = "1.10.5" }
 toml.workspace = true
+env_logger = "0.11.8"
+log = "0.4.27"
+dotenvy = "0.15.7"

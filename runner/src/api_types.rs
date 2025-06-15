@@ -14,7 +14,6 @@ impl fmt::Display for WorkloadType {
 }
 
 #[derive(Deserialize)]
-#[serde(crate = "rocket::serde")]
 pub struct Job {
     pub job_id: String,
     pub experiment_id: String,
@@ -87,7 +86,6 @@ impl ViewJobResponse {
 }
 
 #[derive(Deserialize)]
-#[serde(crate = "rocket::serde")]
 pub struct ExecuteRequest {
     commands: Vec<String>,
 }

@@ -1,17 +1,22 @@
-# runs = 1 # default
-[[experiments]]
 name = "localhost-experiment"
 description = "Testing the functionality of the software completely using localhost"
 kind = "localhost-result"
-[[experiments.setup]]
+execute = "./scripts/actual-work.sh"
+arguments = 1
+runners = ["runner1"]
+# Optional, defaults to 1
+runs = 1
+
+[[setup]]
 runners = ["runner1"]
 scripts = ["./scripts/test-setup.sh"]
-[[experiments.teardown]]
+[[variations]]
+name = "arg 0"
+arguments = 0
+[[variations]]
+name = "arg 1"
+arguments = 1
+exporters = ["test-exporter"]
+[[teardown]]
 runners = ["runner1"]
 scripts = ["./scripts/test-teardown.sh"]
-[[experiments.jobs]]
-name = "test-job"
-runner = "runner1"
-execute = "./scripts/actual-work.sh"
-arguments = 0
-exporters = ["test-exporter"]

@@ -1,14 +1,20 @@
-#[macro_use]
-extern crate rocket;
-
 pub mod api_types;
 pub mod runner;
 
-use api_types::{ExecuteRequest, ExecuteResponse, Job, StartJobResponse, ViewJobResponse};
+use api_types::{
+    ExecuteRequest, ExecuteResponse, Job, StartJobResponse, ViewJobResponse,
+};
+use axum::{
+    extract::{Json, State},
+    routing::{get, post},
+    Router,
+};
+use log::{debug, error, info, trace, warn};
 
+use reqwest::IntoUrl;
 use runner::Runner;
 
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc};
 // use reqwest::Client;
 //
 // use std::{
@@ -20,10 +26,14 @@ use std::sync::mpsc;
 //     time::{SystemTime, UNIX_EPOCH},
 // };
 
-use rocket::{serde::json::Json, State};
+//use rocket::{serde::json::Json, State};
 
-#[get("/")]
-fn index() -> &'static str {
+struct AppState {
+    sender: mpsc::Sender<Job>,
+    runner: Runner,
+}
+
+async fn index() -> &'static str {
     concat!(
         "`GET /job` Gets all available jobs and their status\n",
         "`POST /job { <job_request> }` starts a new job from the request\n",
@@ -31,13 +41,12 @@ fn index() -> &'static str {
     )
 }
 
-#[post("/job", data = "<job>")]
-fn add_job(
+async fn add_job(
+    State(state): State<Arc<AppState>>,
     job: Json<Job>,
-    sender: &State<mpsc::Sender<Job>>,
-    runner: &State<Runner>,
 ) -> Json<StartJobResponse> {
-    runner.add_job(sender, job.into_inner());
+    let runner = &state.runner;
+    runner.add_job(&state.sender, job.0);
 
     Json(StartJobResponse::new(
         *runner.busy().lock().unwrap(),
@@ -45,42 +54,53 @@ fn add_job(
     ))
 }
 
-#[get("/job")]
-fn view_job(runner: &State<Runner>) -> Json<ViewJobResponse> {
+async fn view_job(State(state): State<Arc<AppState>>) -> Json<ViewJobResponse> {
+    let runner = &state.runner;
+
     Json(ViewJobResponse::new(
         *runner.busy().lock().unwrap(),
         *runner.waiting_jobs().lock().unwrap(),
     ))
 }
 
-#[post("/exec", data = "<execute_request>")]
-fn execute(execute_request: Json<ExecuteRequest>, runner: &State<Runner>) -> Json<ExecuteResponse> {
-    let responses = runner.run_commands(execute_request.into_inner().commands());
+async fn execute(
+    State(state): State<Arc<AppState>>,
+    execute_request: Json<ExecuteRequest>,
+) -> Json<ExecuteResponse> {
+    let runner = &state.runner;
+    let responses = runner.run_commands(execute_request.0.commands());
     Json(ExecuteResponse::new(responses))
-    // Json(StartJobResponse {
-    //     running_now: false,
-    //     waiting_jobs: 0,
-    // })
 }
 
-#[launch]
-fn rocket() -> _ {
-    let metrics_api_endpoint = String::from("http://localhost:5000");
-    let workload_repository_endpoint = String::from("http://localhost:50001");
-    let (runner, sender) = Runner::new(metrics_api_endpoint, workload_repository_endpoint);
+async fn status() {}
 
-    // rocket::tokio::spawn(async move {
-    //
-    // })
-    // rocket::tokio::spawn(async {
-    //     runner.execute_job
-    //
-    // }
+#[tokio::main]
+async fn main() {
+    if let Err(e) = dotenvy::dotenv() {
+        eprintln!("Unable to find .env file, relying on host environment...");
+    }
+    env_logger::init();
 
-    rocket::build()
-        .mount("/", routes![index, add_job, view_job, execute])
-        .manage(sender)
-        .manage(runner)
+    let (runner, sender) = Runner::new("localhost:50000".into());
+    let state = Arc::new(AppState { runner, sender });
 
-    // .manage(Runner::new())
+    let app = Router::new()
+        .route("/", get(index))
+        .route("/status", get(status))
+        .route("/job", get(view_job).post(add_job))
+        .with_state(state.clone())
+        .route("/execute", post(execute))
+        .with_state(state);
+
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:50001")
+        .await
+        .unwrap();
+
+    info!("Now serving at http://localhost:50001");
+    axum::serve(listener, app).await.unwrap();
+}
+
+struct EnvArgs {
+    rust_log: String,
+    brain_endpoint: String,
 }
