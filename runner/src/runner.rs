@@ -108,11 +108,11 @@ impl Runner {
 
     fn build_exec_command(&self, experiment: &Experiment) -> Command {
         let mut command_args = vec![format!(
-            "./resources/experiments/{}/{}.sh",
-            experiment.workload_type, experiment.workload
+            "./resources/experiments/{}.sh",
+            experiment.get_workload()
         )];
 
-        if let Some(args) = &experiment.arguments {
+        if let Some(args) = &experiment.get_arguments() {
             command_args.push(args.to_string())
         };
 
@@ -179,7 +179,10 @@ impl Runner {
             .client
             .post(format!(
                 "http://{}/experiment/{}/experiment/{}/{}",
-                self.brain_endpoint, experiment.id, experiment.id, request_type
+                self.brain_endpoint,
+                experiment.get_id(),
+                experiment.get_id(),
+                request_type
             ))
             .json(&body)
             .send()
@@ -198,8 +201,9 @@ impl Runner {
 
     async fn execute_experiment(&self, experiment: &Experiment) -> Result<()> {
         println!(
-            "Executing '{}' - execute '{}' on '{}'",
-            experiment.id, experiment.workload, experiment.workload_type
+            "Executing '{}' - execute '{}'",
+            experiment.get_id(),
+            experiment.get_workload(),
         );
 
         println!("[LOG] Reporting experiment start");

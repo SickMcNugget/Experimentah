@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::fmt;
+use std::{fmt, fs};
 
 #[cfg_attr(test, derive(Serialize))]
 #[derive(Deserialize)]
@@ -28,6 +28,10 @@ impl Experiment {
         self.id = id;
     }
     pub fn set_workload(&mut self, workload: String) {
+        fs::exists(&workload).expect(&format!(
+            "Workload shell script {} should be created by controller.",
+            &workload
+        ));
         self.workload = workload;
     }
     pub fn set_arguments(&mut self, arguments: Option<String>) {

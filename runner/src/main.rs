@@ -1,9 +1,9 @@
 pub mod api_types;
 pub mod runner;
+pub mod utils;
 
 use api_types::{
     ExecuteRequest, ExecuteResponse, Experiment, ExperimentResponse,
-    ExperimentResponse,
 };
 use axum::{
     extract::{Json, State},
@@ -182,11 +182,11 @@ mod tests {
         // simulate main by running the runner server
         let state = create_state();
         let app = app(state);
-        let experiment_data = Experiment {
-            id: String::from("test_experiment_1"),
-            workload: String::from("test/abc.sh"),
-            arguments: None,
-        };
+        let experiment_data = Experiment::new(
+            String::from("test_experiment_1"),
+            String::from("test/abc.sh"),
+            None,
+        );
         let request = Request::builder()
             .method("POST")
             .uri("/experiment")
