@@ -14,7 +14,16 @@ pub struct Experiment {
 
 // TODO: Add error checking for workload
 impl Experiment {
-    pub fn new(id: String, workload: String, arguments: Option<String>) {}
+    pub fn new(
+        &mut self,
+        id: String,
+        workload: String,
+        arguments: Option<String>,
+    ) {
+        self.set_id(id);
+        self.set_workload(workload);
+        self.set_arguments(arguments);
+    }
     pub fn get_id(&self) -> &String {
         &self.id
     }
