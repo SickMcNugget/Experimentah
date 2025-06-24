@@ -1,87 +1,53 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+#[cfg_attr(test, derive(Serialize))]
 #[derive(Deserialize)]
-pub enum WorkloadType {
-    Rke2,
-    Native,
+pub struct Experiment {
+    // Fields aren't pub since we want to ensure Experiments
+    // undergo validation on creation
+    id: String,
+    // Absolute file path to shell script for execution.
+    workload: String,
+    arguments: Option<String>,
 }
 
-impl fmt::Display for WorkloadType {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}", self)
+// TODO: Add error checking for workload
+impl Experiment {
+    pub fn new(id: String, workload: String, arguments: Option<String>) {}
+    pub fn get_id(&self) -> &String {
+        &self.id
     }
-}
-
-#[derive(Deserialize)]
-pub struct Job {
-    pub job_id: String,
-    pub experiment_id: String,
-    pub workload: String,
-    pub workload_type: WorkloadType,
-    pub arguments: Option<String>,
-}
-
-impl Job {
-    pub fn job_id(&self) -> &String {
-        &self.job_id
-    }
-
-    pub fn experiment_id(&self) -> &String {
-        &self.experiment_id
-    }
-
-    pub fn workload(&self) -> &String {
+    pub fn get_workload(&self) -> &String {
         &self.workload
     }
-
-    pub fn workload_type(&self) -> &WorkloadType {
-        &self.workload_type
-    }
-
-    // Not sure how I should properly return a reference to an Option<T>
-    pub fn arguments(&self) -> &Option<String> {
+    pub fn get_arguments(&self) -> &Option<String> {
         &self.arguments
     }
+    pub fn set_id(&mut self, id: String) {
+        self.id = id;
+    }
+    pub fn set_workload(&mut self, workload: String) {
+        self.workload = workload;
+    }
+    pub fn set_arguments(&mut self, arguments: Option<String>) {
+        self.arguments = arguments;
+    }
 }
 
+#[cfg_attr(test, derive(Deserialize))]
 #[derive(Serialize)]
-pub struct StartJobResponse {
-    busy: bool,
-    waiting_jobs: u32,
+pub struct ExperimentResponse {
+    pub busy: bool,
+    pub waiting_experiments: u32,
 }
 
-impl StartJobResponse {
-    pub fn new(busy: bool, waiting_jobs: u32) -> Self {
-        Self { busy, waiting_jobs }
-    }
-
-    pub fn busy(&self) -> bool {
-        self.busy
-    }
-
-    pub fn waiting_jobs(&self) -> u32 {
-        self.waiting_jobs
-    }
-}
-
-#[derive(Serialize)]
-pub struct ViewJobResponse {
-    busy: bool,
-    waiting_jobs: u32,
-}
-
-impl ViewJobResponse {
-    pub fn new(busy: bool, waiting_jobs: u32) -> Self {
-        Self { busy, waiting_jobs }
-    }
-
-    pub fn busy(&self) -> bool {
-        self.busy
-    }
-
-    pub fn waiting_jobs(&self) -> u32 {
-        self.waiting_jobs
+impl ExperimentResponse {
+    pub fn new(busy: bool, waiting_experiments: u32) -> Self {
+        Self {
+            busy,
+            waiting_experiments,
+        }
     }
 }
 

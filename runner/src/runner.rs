@@ -1,4 +1,4 @@
-use super::api_types::Job;
+use super::api_types::Experiment;
 use regex::Regex;
 use reqwest::Client;
 use serde::Serialize;
@@ -64,27 +64,27 @@ impl From<&str> for RunnerError {
 }
 
 pub struct Runner {
-    job_queue: Mutex<Receiver<Job>>,
+    experiment_queue: Mutex<Receiver<Experiment>>,
     busy: Mutex<bool>,
-    waiting_jobs: Mutex<u32>,
+    waiting_experiments: Mutex<u32>,
     running: bool,
     client: reqwest::Client,
     brain_endpoint: String,
     // workload_repository_endpoint: String,
-    job_regex: Regex,
+    experiment_regex: Regex,
 }
 
 impl Runner {
-    pub fn new(brain_endpoint: String) -> (Self, Sender<Job>) {
+    pub fn new(brain_endpoint: String) -> (Self, Sender<Experiment>) {
         let (sender, receiver) = mpsc::channel();
         let runner = Runner {
-            job_queue: Mutex::new(receiver),
+            experiment_queue: Mutex::new(receiver),
             busy: Mutex::new(false),
-            waiting_jobs: Mutex::new(0),
+            waiting_experiments: Mutex::new(0),
             running: true,
             client: Client::new(),
             brain_endpoint,
-            job_regex: Regex::new(r"%%%%%\nworkload_output:@@@@@(?<workload_output>.+?)@@@@@\nstart_time_unix:@@@@@(?<start_time_unix>\d+)@@@@@\nend_time_unix:@@@@@(?<end_time_unix>\d+)@@@@@\n%%%%%").unwrap(),
+            experiment_regex: Regex::new(r"%%%%%\nworkload_output:@@@@@(?<workload_output>.+?)@@@@@\nstart_time_unix:@@@@@(?<start_time_unix>\d+)@@@@@\nend_time_unix:@@@@@(?<end_time_unix>\d+)@@@@@\n%%%%%").unwrap(),
         };
 
         (runner, sender)
@@ -94,8 +94,8 @@ impl Runner {
         &self.busy
     }
 
-    pub fn waiting_jobs(&self) -> &Mutex<u32> {
-        &self.waiting_jobs
+    pub fn waiting_experiments(&self) -> &Mutex<u32> {
+        &self.waiting_experiments
     }
 
     fn get_time(&self) -> String {
@@ -106,13 +106,13 @@ impl Runner {
             .to_string()
     }
 
-    fn build_exec_command(&self, job: &Job) -> Command {
+    fn build_exec_command(&self, experiment: &Experiment) -> Command {
         let mut command_args = vec![format!(
-            "./resources/jobs/{}/{}.sh",
-            job.workload_type, job.workload
+            "./resources/experiments/{}/{}.sh",
+            experiment.workload_type, experiment.workload
         )];
 
-        if let Some(args) = &job.arguments {
+        if let Some(args) = &experiment.arguments {
             command_args.push(args.to_string())
         };
 
@@ -121,11 +121,15 @@ impl Runner {
         command
     }
 
-    pub fn add_job(&self, sender: &Sender<Job>, job: Job) {
+    pub fn add_experiment(
+        &self,
+        sender: &Sender<Experiment>,
+        experiment: Experiment,
+    ) {
         sender
-            .send(job)
-            .expect("Unable to send job to runner queue");
-        *self.waiting_jobs.lock().unwrap() += 1;
+            .send(experiment)
+            .expect("Unable to send experiment to runner queue");
+        *self.waiting_experiments.lock().unwrap() += 1;
     }
 
     pub fn run_commands(&self, commands: &Vec<String>) -> Vec<String> {
@@ -145,17 +149,17 @@ impl Runner {
     }
 
     // async fn run_loop(&self) {
-    //     while let Ok(job) = self
-    //         .job_queue
+    //     while let Ok(experiment) = self
+    //         .experiment_queue
     //         .lock()
-    //         .expect("Unable to acquire mutex for job queue")
+    //         .expect("Unable to acquire mutex for experiment queue")
     //         .recv()
     //     {
     //         {
     //             *self.busy.lock().expect("Unable to lock busy bool") = true
     //         };
     //
-    //         match self.execute_job(job) {
+    //         match self.execute_experiment(experiment) {
     //             Ok(_) => {}
     //             Err(_) => {}
     //         }
@@ -165,7 +169,7 @@ impl Runner {
     async fn brain_request<T>(
         &self,
         request_type: &str,
-        job: &Job,
+        experiment: &Experiment,
         body: T,
     ) -> Result<reqwest::Response>
     where
@@ -174,8 +178,8 @@ impl Runner {
         let response = self
             .client
             .post(format!(
-                "http://{}/experiment/{}/job/{}/{}",
-                self.brain_endpoint, job.experiment_id, job.job_id, request_type
+                "http://{}/experiment/{}/experiment/{}/{}",
+                self.brain_endpoint, experiment.id, experiment.id, request_type
             ))
             .json(&body)
             .send()
@@ -192,17 +196,17 @@ impl Runner {
         return Ok(response);
     }
 
-    async fn execute_job(&self, job: &Job) -> Result<()> {
+    async fn execute_experiment(&self, experiment: &Experiment) -> Result<()> {
         println!(
             "Executing '{}' - execute '{}' on '{}'",
-            job.experiment_id, job.workload, job.workload_type
+            experiment.id, experiment.workload, experiment.workload_type
         );
 
-        println!("[LOG] Reporting job start");
+        println!("[LOG] Reporting experiment start");
         let map = HashMap::from([("runnerTimestampMs", self.get_time())]);
-        self.brain_request("start", job, map).await?;
+        self.brain_request("start", experiment, map).await?;
 
-        let mut command = self.build_exec_command(job);
+        let mut command = self.build_exec_command(experiment);
 
         println!("[LOG] Executing command: {:?}", command);
 
@@ -213,7 +217,8 @@ impl Runner {
                     ("reason", e.to_string()),
                     ("runnerTimestampMs", self.get_time()),
                 ]);
-                let response = self.brain_request("error", job, body).await?;
+                let response =
+                    self.brain_request("error", experiment, body).await?;
 
                 // If we got this far, we have an error
                 return Err(RunnerError::new(format!(
@@ -223,18 +228,21 @@ impl Runner {
             }
         };
 
-        let parsed_result = self.parse_job_output(result.stdout)?;
+        let parsed_result = self.parse_experiment_output(result.stdout)?;
 
         Ok(())
     }
 
-    fn parse_job_output(&self, bytes: Vec<u8>) -> Result<HashMap<&str, String>> {
+    fn parse_experiment_output(
+        &self,
+        bytes: Vec<u8>,
+    ) -> Result<HashMap<&str, String>> {
         let output: String = String::from_utf8(bytes)?.trim().into();
 
         let caps = self
-            .job_regex
+            .experiment_regex
             .captures(output.as_str())
-            .ok_or("Unable to parse job output")?;
+            .ok_or("Unable to parse experiment output")?;
 
         // output
         Ok(HashMap::from([
@@ -251,7 +259,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn job_parsing() {
+    fn experiment_parsing() {
         let bytes: Vec<u8> = "%%%%%\nworkload_output:@@@@@I did it dad!@@@@@\nstart_time_unix:@@@@@1721742181@@@@@\nend_time_unix:@@@@@1721742182@@@@@\n%%%%%".as_bytes().to_vec();
         let expected = HashMap::from([
             ("resultsRaw", "I did it dad!"),
@@ -259,11 +267,21 @@ mod tests {
             ("processEndTimeMs", "1721742182"),
         ]);
 
-        let (runner, _) = Runner::new("127.0.0.1:50000".into(), "127.0.0.1:50001".into());
-        let actual = runner.parse_job_output(bytes).unwrap();
+        let (runner, _) =
+            // Runner::new("127.0.0.1:50000".into(), "127.0.0.1:50001".into());
+            Runner::new("127.0.0.1:50000".into());
+        let actual = runner.parse_experiment_output(bytes).unwrap();
 
         assert_eq!(expected["resultsRaw"], actual["resultsRaw"]);
-        assert_eq!(expected["processStartTimeMs"], actual["processStartTimeMs"]);
+        assert_eq!(
+            expected["processStartTimeMs"],
+            actual["processStartTimeMs"]
+        );
         assert_eq!(expected["processEndTimeMs"], actual["processEndTimeMs"]);
     }
+
+    // #[test]
+    // fn example_workload() {
+    //     let body =
+    // }
 }
