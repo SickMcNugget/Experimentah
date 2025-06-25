@@ -1,5 +1,5 @@
 [workspace]
-members = ["controller", "metrics-api", "runner"]
+members = ["controller", "metrics-api", "runner", "ssh_utils"]
 resolver = "2"
 
 # [package]
