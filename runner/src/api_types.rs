@@ -15,14 +15,22 @@ pub struct Experiment {
 // TODO: Add error checking for workload
 impl Experiment {
     pub fn new(
-        &mut self,
         id: String,
         workload: String,
         arguments: Option<String>,
-    ) {
-        self.set_id(id);
-        self.set_workload(workload);
-        self.set_arguments(arguments);
+    ) -> Self {
+        // Can't find a way to initialise just with the setters.
+        // Use placeholder workaround
+        // TODO: Review
+        let mut p = Experiment {
+            id: String::new(),
+            workload: String::new(),
+            arguments: None,
+        };
+        p.set_id(id);
+        p.set_workload(workload);
+        p.set_arguments(arguments);
+        p
     }
     pub fn get_id(&self) -> &String {
         &self.id
@@ -36,12 +44,28 @@ impl Experiment {
     pub fn set_id(&mut self, id: String) {
         self.id = id;
     }
+    // Validate that the workload file actually exists
     pub fn set_workload(&mut self, workload: String) {
-        fs::exists(&workload).expect(&format!(
-            "Workload shell script {} should be created by controller.",
-            &workload
-        ));
-        self.workload = workload;
+        // Quit if the shell script doesn't exist for a run workload.
+        // Alternatively, could set to a default or None and have the user
+        // check it, but this seems safer for the base case and seems easiest
+        // to handle consistently (setting invalid workload on currently valid Experiment etc.).
+        match fs::exists(&workload) {
+            Ok(exists) => {
+                if exists {
+                    println!("Valid workload {}", &workload);
+                    self.workload = workload;
+                } else {
+                    panic!("Couldn't find workload script {} - must exist before running experiments.", &workload);
+                }
+            }
+            Err(e) => {
+                panic!(
+                    "Can't confirm file existence for {} with error {}.",
+                    &workload, e
+                );
+            }
+        }
     }
     pub fn set_arguments(&mut self, arguments: Option<String>) {
         self.arguments = arguments;
@@ -55,41 +79,14 @@ pub struct ExperimentResponse {
     pub waiting_experiments: u32,
 }
 
-impl ExperimentResponse {
-    pub fn new(busy: bool, waiting_experiments: u32) -> Self {
-        Self {
-            busy,
-            waiting_experiments,
-        }
-    }
-}
-
+#[cfg_attr(test, derive(Serialize))]
 #[derive(Deserialize)]
 pub struct ExecuteRequest {
-    commands: Vec<String>,
+    pub commands: Vec<String>,
 }
 
-impl ExecuteRequest {
-    pub fn new(commands: Vec<String>) -> Self {
-        Self { commands }
-    }
-
-    pub fn commands(&self) -> &Vec<String> {
-        &self.commands
-    }
-}
-
+#[cfg_attr(test, derive(Deserialize))]
 #[derive(Serialize)]
 pub struct ExecuteResponse {
-    command_responses: Vec<String>,
-}
-
-impl ExecuteResponse {
-    pub fn new(command_responses: Vec<String>) -> Self {
-        Self { command_responses }
-    }
-
-    pub fn command_responses(&self) -> &Vec<String> {
-        &self.command_responses
-    }
+    pub command_responses: Vec<String>,
 }

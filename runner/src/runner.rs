@@ -284,8 +284,26 @@ mod tests {
         assert_eq!(expected["processEndTimeMs"], actual["processEndTimeMs"]);
     }
 
-    // #[test]
-    // fn example_workload() {
-    //     let body =
-    // }
+    #[tokio::test]
+    async fn add_invalid_experiment() {
+        let result = std::panic::catch_unwind(|| {
+            let _experiment_data = Experiment::new(
+                String::from("test_experiment_1"),
+                // This can be any file that doesn't exist in the fs.
+                String::from("/abc/def/ghi.sh"),
+                None,
+            );
+        });
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn add_valid_experiment() {
+        let _experiment_data = Experiment::new(
+            String::from("test_experiment_1"),
+            // This can be any file that exists in the fs.
+            String::from("/tmp"),
+            None,
+        );
+    }
 }
