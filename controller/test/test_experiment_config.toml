@@ -1,0 +1,25 @@
+name = "localhost-experiment"
+description = "Testing the functionality of the software completely using localhost"
+kind = "localhost-result"
+execute = "./scripts/actual-work.sh"
+arguments = 1
+runners = ["runner1"]
+# Optional, defaults to 1
+runs = 1
+
+[[setup]]
+runners = ["runner1"]
+scripts = ["./scripts/test-setup.sh"]
+[[variations]]
+name = "different arg"
+arguments = 0
+[[variations]]
+name = "with exporter"
+exporters = ["test-exporter"]
+[[variations]]
+name = "with multiple exporters"
+arguments = 1
+exporters = ["test-exporter", "another-test-exporter"]
+[[teardown]]
+runners = ["runner1"]
+scripts = ["./scripts/test-teardown.sh"]

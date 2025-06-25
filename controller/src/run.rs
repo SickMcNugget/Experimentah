@@ -1,408 +1,220 @@
-use crate::parse::{Config, ExperimentConfig, RemoteExecutionConfig};
-
-use reqwest::Client;
-use serde_json::json;
-use std::process::Command;
-use std::{
-    collections::{HashMap, HashSet},
-    error::Error,
-    path::{Path, PathBuf},
-    sync::Arc,
+use crate::parse::{
+    to_experiments, Config, Experiment, ExperimentConfig, Runner,
 };
 
-#[derive(Debug)]
-pub struct Experiment<'a> {
-    pub id: Option<String>,
-    pub name: String,
-    pub description: &'a str,
-    pub kind: &'a str,
-    pub setup: Vec<RemoteExecution<'a>>,
-    pub teardown: Vec<RemoteExecution<'a>>,
-    pub runners: Vec<Runner<'a>>,
-    pub execute: &'a Path,
-    pub arguments: &'a u8,
-    pub exporters: Vec<Exporter<'a>>,
-}
+use reqwest::Client;
+use std::process::{Child, Command};
+use std::{collections::HashSet, path::Path};
 
-impl<'a> Experiment<'a> {
-    fn new(
-        name: String,
-        description: &'a str,
-        kind: &'a String,
-        setup: Vec<RemoteExecution<'a>>,
-        teardown: Vec<RemoteExecution<'a>>,
-        runners: Vec<Runner<'a>>,
-        execute: &'a PathBuf,
-        arguments: &'a u8,
-        exporters: Vec<Exporter<'a>>,
-    ) -> Self {
-        Self {
-            id: None,
-            name,
-            description,
-            kind,
-            setup,
-            teardown,
-            runners,
-            execute,
-            arguments,
-            exporters,
-        }
-    }
-}
-
-#[derive(Debug, Hash, Eq, PartialEq)]
-pub struct Runner<'a> {
-    pub name: &'a str,
-    pub address: &'a str,
-    pub port: &'a u16,
-}
-
-impl<'a> Runner<'a> {
-    fn new(name: &'a str, address: &'a str, port: &'a u16) -> Self {
-        Self {
-            name,
-            address,
-            port,
-        }
-    }
-
-    fn url(&self) -> String {
-        format!("http://{}:{}", self.address, self.port)
-    }
-}
+type Result<T> = std::result::Result<T, RuntimeError>;
 
 #[derive(Debug)]
-pub struct Exporter<'a> {
-    pub name: &'a str,
-    pub address: &'a str,
-    pub command: &'a str,
-    pub setup: Vec<&'a str>,
-    pub poll_interval: &'a u16,
+pub enum RuntimeError {
+    ReqwestError(String, reqwest::Error),
+    // I know, it's hilarious
+    BadStatusCode(String, reqwest::StatusCode),
+    IOError(String, std::io::Error),
+    Generic(String),
 }
 
-impl<'a> Exporter<'a> {
-    fn new(
-        name: &'a str,
-        address: &'a str,
-        command: &'a str,
-        setup: &'a Vec<String>,
-        poll_interval: &'a u16,
-    ) -> Self {
-        let mapped_setup = setup
-            .iter()
-            .map(|command| command.as_str())
-            .collect::<Vec<&'a str>>();
-
-        Self {
-            name,
-            address,
-            command,
-            setup: mapped_setup,
-            poll_interval,
-        }
-    }
-}
-#[derive(Debug)]
-pub struct RemoteExecution<'a> {
-    pub runners: Vec<Runner<'a>>,
-    pub scripts: Vec<&'a Path>,
-}
-
-impl<'a> RemoteExecution<'a> {
-    fn new(runners: Vec<Runner<'a>>, scripts: &'a Vec<PathBuf>) -> Self {
-        let mapped_scripts =
-            scripts.iter().map(|script| script.as_path()).collect();
-        Self {
-            runners,
-            scripts: mapped_scripts,
+impl std::fmt::Display for RuntimeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match *self {
+            RuntimeError::ReqwestError(ref message, ref source) => {
+                write!(f, "{message}: {source}")
+            }
+            RuntimeError::BadStatusCode(ref message, ref code) => {
+                write!(f, "{message}: Failed with status code: {code}")
+            }
+            RuntimeError::IOError(ref message, ref source) => {
+                write!(f, "{message}: {source}")
+            }
+            RuntimeError::Generic(ref message) => {
+                write!(f, "{message}")
+            }
         }
     }
 }
 
-// #[derive(Debug)]
-// pub struct ExporterConfig {
-//     name: String,
-//     host: String,
-//     // port: u16,
-//     command: String,
-//     setup: Vec<String>,
-//     #[serde(default = "ExporterConfig::default_poll_interval")]
-//     poll_interval: u16,
-// }
+impl std::error::Error for RuntimeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match *self {
+            RuntimeError::ReqwestError(.., ref source) => Some(source),
+            RuntimeError::IOError(.., ref source) => Some(source),
+            RuntimeError::BadStatusCode(..) => None,
+            RuntimeError::Generic(..) => None,
+        }
+    }
+}
+
+impl From<(&str, reqwest::Error)> for RuntimeError {
+    fn from(value: (&str, reqwest::Error)) -> Self {
+        RuntimeError::ReqwestError(value.0.to_string(), value.1)
+    }
+}
+
+impl From<(String, reqwest::Error)> for RuntimeError {
+    fn from(value: (String, reqwest::Error)) -> Self {
+        RuntimeError::ReqwestError(value.0, value.1)
+    }
+}
+
+impl From<(&str, std::io::Error)> for RuntimeError {
+    fn from(value: (&str, std::io::Error)) -> Self {
+        RuntimeError::IOError(value.0.to_string(), value.1)
+    }
+}
+
+impl From<(String, std::io::Error)> for RuntimeError {
+    fn from(value: (String, std::io::Error)) -> Self {
+        RuntimeError::IOError(value.0, value.1)
+    }
+}
+
+impl From<(String, reqwest::StatusCode)> for RuntimeError {
+    fn from(value: (String, reqwest::StatusCode)) -> Self {
+        RuntimeError::BadStatusCode(value.0, value.1)
+    }
+}
+
+impl From<String> for RuntimeError {
+    fn from(value: String) -> Self {
+        RuntimeError::Generic(value)
+    }
+}
+
+impl From<&str> for RuntimeError {
+    fn from(value: &str) -> Self {
+        RuntimeError::Generic(value.to_string())
+    }
+}
+
+#[allow(dead_code)]
+struct ChildProcess {
+    address: String,
+    child: Child,
+}
+
+impl ChildProcess {
+    fn new(address: String, child: Child) -> Self {
+        Self { address, child }
+    }
+}
 
 // The ExperimentRunner should only be used AFTER parsing has been completed!
 pub struct ExperimentRunner<'a> {
-    // pub config: Arc<Config>,
-    // pub experiment_config: Arc<ExperimentConfig>,
     pub experiments: Vec<Experiment<'a>>,
+    subprocesses: Vec<ChildProcess>,
 
-    client: Arc<Client>,
+    client: Client,
 }
 
 impl<'a> ExperimentRunner<'a> {
     pub fn new(
         config: &'a Config,
         experiment_config: &'a ExperimentConfig,
-        client: Arc<Client>,
+        client: Client,
     ) -> Self {
-        let experiments =
-            ExperimentRunner::experiments(config, experiment_config);
-
         Self {
-            experiments,
+            experiments: to_experiments(config, experiment_config),
+            subprocesses: vec![],
             client,
         }
     }
-
-    fn map_runners(
-        config: &'a Config,
-        runners: &'a Vec<String>,
-    ) -> Vec<Runner<'a>> {
-        let mut mapped_runners = Vec::with_capacity(runners.len());
-        for c_runner in config.runners.iter() {
-            for runner in runners.iter() {
-                if c_runner.name == *runner {
-                    let host = config.hosts.iter().find(|host| host.name == c_runner.host).expect("We should not fail to cross-reference at this point.");
-                    mapped_runners.push(Runner::new(
-                        &c_runner.name,
-                        &host.address,
-                        &c_runner.port,
-                    ));
-                }
-            }
-        }
-        mapped_runners
-    }
-
-    fn map_exporters(
-        config: &'a Config,
-        exporters: &'a [String],
-    ) -> Vec<Exporter<'a>> {
-        let mut mapped_exporters = Vec::with_capacity(exporters.len());
-        for c_exporter in config.exporters.iter() {
-            for exporter in exporters.iter() {
-                if c_exporter.name == *exporter {
-                    let host = config.hosts.iter().find(|host| host.name == c_exporter.host).expect("We should not fail to cross-reference at this point.");
-                    mapped_exporters.push(Exporter::new(
-                        &c_exporter.name,
-                        &host.address,
-                        &c_exporter.command,
-                        &c_exporter.setup,
-                        &c_exporter.poll_interval,
-                    ));
-                }
-            }
-        }
-        mapped_exporters
-    }
-
-    fn map_remote_executions(
-        config: &'a Config,
-        remote_executions: &'a [RemoteExecutionConfig],
-    ) -> Vec<RemoteExecution<'a>> {
-        let mut mapped_remote_executions =
-            Vec::with_capacity(remote_executions.len());
-        for remote_execution in remote_executions.iter() {
-            let mut mapped_runners =
-                Vec::with_capacity(remote_execution.runners.len());
-            for c_runner in config.runners.iter() {
-                for runner in remote_execution.runners.iter() {
-                    if c_runner.name == *runner {
-                        let host = config.hosts.iter().find(|host| host.name == c_runner.host).expect("We should not fail to cross-reference at this point.");
-                        mapped_runners.push(Runner::new(
-                            &c_runner.name,
-                            &host.address,
-                            &c_runner.port,
-                        ));
-                    }
-                }
-            }
-            mapped_remote_executions.push(RemoteExecution::new(
-                mapped_runners,
-                &remote_execution.scripts,
-            ));
-        }
-        mapped_remote_executions
-    }
-
-    // pub name: String,
-    // pub description: String,
-    // pub kind: String,
-    // pub execute: PathBuf,
-    // pub arguments: Option<u8>,
-    // #[serde(default = "ExperimentConfig::default_runs")]
-    // pub runs: u16,
-    // #[serde(default)]
-    // pub setup: Vec<RemoteExecution>,
-    // #[serde(default)]
-    // pub teardown: Vec<RemoteExecution>,
-    // #[serde(default)]
-    // pub variations: Vec<ExperimentVariation>,
-    // #[serde(default)]
-    // pub exporters: Vec<String>,
-    // #[serde(default)]
-    // pub runners: Vec<String>,
 
     // An experiment is constructed from the experiment configuration.
     // It's easier to construct it with a function because there isn't a one-to-one
     // mapping from an experiment variation to an experiment. There's an override system
     // that makes creating experiments easier on the user end. We handle all the cases
     // starting from this function.
-    pub fn experiments(
-        config: &'a Config,
-        experiment_config: &'a ExperimentConfig,
-    ) -> Vec<Experiment<'a>> {
-        let name = &experiment_config.name;
-        let description = &experiment_config.description;
-        let kind = &experiment_config.kind;
-        let execute = &experiment_config.execute;
-        let arguments = &experiment_config.arguments;
-        let setup = &experiment_config.setup;
-        let teardown = &experiment_config.teardown;
-        let variations = &experiment_config.variations;
-        let exporters = &experiment_config.exporters;
-        let runners = &experiment_config.runners;
 
-        let with_base: bool = !runners.is_empty() && arguments.is_some();
-        let num_experiments = if with_base {
-            variations.len() + 1
-        } else {
-            variations.len()
-        };
-
-        let mut experiments = Vec::with_capacity(num_experiments);
-        if with_base {
-            experiments.push(Experiment::new(
-                name.clone(),
-                description,
-                kind,
-                ExperimentRunner::map_remote_executions(config, setup),
-                ExperimentRunner::map_remote_executions(config, teardown),
-                ExperimentRunner::map_runners(config, runners),
-                execute,
-                arguments.as_ref().unwrap(),
-                ExperimentRunner::map_exporters(config, exporters),
-            ));
-        }
-
-        for variation in experiment_config.variations.iter() {
-            let name = format!("{name}{}", variation.name);
-            let arguments = variation
-                .arguments
-                .as_ref()
-                .or(experiment_config.arguments.as_ref());
-            let runners = if !variation.runners.is_empty() {
-                &variation.runners
-            } else {
-                &experiment_config.runners
-            };
-            let exporters = if !variation.exporters.is_empty() {
-                &variation.exporters
-            } else {
-                &experiment_config.exporters
-            };
-            experiments.push(Experiment::new(
-                name,
-                description,
-                kind,
-                ExperimentRunner::map_remote_executions(config, setup),
-                ExperimentRunner::map_remote_executions(config, teardown),
-                ExperimentRunner::map_runners(config, runners),
-                execute,
-                arguments.unwrap(),
-                ExperimentRunner::map_exporters(config, exporters),
-            ));
-        }
-        experiments
-    }
-
-    fn unique_runners(&self) -> HashSet<&Runner> {
+    fn unique_runners(
+        experiments: &'a [Experiment],
+    ) -> HashSet<&'a Runner<'a>> {
         let mut unique_runners = HashSet::new();
-        for experiment in self.experiments.iter() {
+        for experiment in experiments.iter() {
             for runner in experiment.runners.iter() {
                 unique_runners.insert(runner);
             }
         }
-
         unique_runners
     }
 
-    pub async fn prep_runners(&self) {
-        let unique_runners = self.unique_runners();
+    // Checks if runners are reachable
+    // If any runners fail, they are returned in a vector to be activated
+    // later.
+    pub async fn check_runners(&mut self) -> Result<()> {
+        let unique_runners =
+            ExperimentRunner::unique_runners(&self.experiments);
+
         for runner in unique_runners.into_iter() {
-            match self.client.get(runner.url() + "/status").send().await {
-                // A bad status code means we have a problem in the runner/malformed request
-                Ok(response) => match response.status() {
-                    reqwest::StatusCode::OK => {
-                        println!("Runner was available at {}", response.url());
-                    }
-                    _ => {
-                        eprintln!(
-                            "Reaching runner at {} failed with error: {}",
-                            response.url(),
-                            response.status()
-                        );
-                    }
-                },
-                // Failure to connect prompts us to send over and start the runner
+            let url = runner.url() + "/status";
+            match self.client.get(&url).send().await {
+                Ok(response) => {
+                    let status = response.status();
+                    match status {
+                        reqwest::StatusCode::OK => {
+                            println!("Runner {} is available", runner.name)
+                        }
+                        _ => Err(RuntimeError::BadStatusCode(
+                            format!("Error reaching runner at {}", url),
+                            status,
+                        ))?,
+                    };
+                }
                 Err(e) => {
+                    // If we were unable to connect to the runner,
+                    // then we can try and make sure that there is a
+                    // runner running
                     if e.is_connect() {
-                        ExperimentRunner::distribute_runner(
-                            runner.address,
-                            runner.port,
-                        );
+                        self.subprocesses.push(ChildProcess::new(
+                            runner.address.to_string(),
+                            ExperimentRunner::distribute_runner(
+                                runner.address,
+                                runner.port,
+                            )?,
+                        ));
                     } else {
-                        eprintln!("Unexpected error during prep_runners: {e}");
+                        Err(RuntimeError::from((
+                            format!(
+                                "Error making request to runner {}",
+                                runner.name
+                            ),
+                            e,
+                        )))?
                     }
                 }
             }
         }
-
-        // let mut promises = Vec::with_capacity(unique_runners.len());
-        // for runner in self.unique_runners().iter() {
-        //     self.client.get(runner.url() + "/status").send().await;
-        // }
-
-        // for experiment in self.experiments.iter() {
-        //     for runner in experiment.unique.iter() {
-        //         self.client.get(runner.url() + "/status").send().await;
-        //     }
-        // }
-        // for experiment in self.experiments() {
-        //     for runner in experiment.runners {
-        //         runner.
-        //     }
-        // }
-        // for variation in experiment_config.experiments()
-        // let experiment
+        Ok(())
     }
 
     // We assume the runner is in the current directory and simply called 'runner'
     // A key aspect of experimentah is the use of advisory locks. These
-    fn distribute_runner(address: &str, port: &u16) {
+    fn distribute_runner(address: &str, _port: &u16) -> Result<Child> {
         let runner_binary = Path::new("./runner");
 
+        dbg!(runner_binary);
         assert!(
             runner_binary.exists(),
             "Runner binary does not exist in current directory!"
         );
 
         if address == "localhost" {
-            match Command::new(runner_binary).output() {
-                Ok(..) => {
-                    println!("Successfully executed")
-                }
+            match Command::new(runner_binary).spawn() {
+                Ok(child) => Ok(child),
                 Err(e) => {
-                    eprintln!("Unable to execute runner: {e}");
+                    Err(RuntimeError::from(("Unable to execute runner", e)))?
                 }
             }
-        }
-        match Command::new("ssh").arg(address).output() {
-            Ok(result) => {
-                println!("{}", result.status)
+        } else {
+            match Command::new("ssh").arg(address).spawn() {
+                Ok(child) => {
+                    Ok(child)
+                    // println!("{}", result.status)
+                }
+                Err(e) => Err(RuntimeError::from(("Error executing SSH", e)))?,
             }
-            Err(e) => eprintln!("Error executing command: {e}"),
         }
     }
 
@@ -667,10 +479,49 @@ impl<'a> ExperimentRunner<'a> {
     // // pub fn run_experiment() -> Result<String, String> {}
 }
 
+#[allow(dead_code)]
 fn get_time() -> String {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("Time went backwards")
         .as_millis()
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{path::PathBuf, str::FromStr, time::Duration};
+
+    use super::*;
+    use crate::parse::{Config, ExperimentConfig};
+
+    fn test_path() -> PathBuf {
+        PathBuf::from_str("test").expect("Failed to parse test_path")
+    }
+
+    fn generate_configs() -> (Config, ExperimentConfig) {
+        let test_path = test_path();
+        let config = Config::from_file(&test_path.join("test_config.toml"))
+        .expect("Config failed to parse. Refer to parse::parse_config test for what went wrong");
+        let experiment_config = ExperimentConfig::from_file(&test_path.join("test_experiment_config.toml"), &config)
+        .expect("ExperimentConfig failed to parse. Refer to parse::parse_experiment_config test for what went wrong");
+
+        (config, experiment_config)
+    }
+
+    fn generate_client() -> Client {
+        Client::builder()
+            .timeout(Duration::from_secs(1))
+            .build()
+            .expect("Somehow an invalid client was built")
+    }
+
+    // #[tokio::test]
+    // async fn runner_availability() {
+    //     let (config, experiment_config) = generate_configs();
+    //     let client = generate_client();
+    //     let mut er = ExperimentRunner::new(&config, &experiment_config, client);
+    //
+    //     er.check_runners().await.unwrap();
+    // }
 }

@@ -2,11 +2,7 @@
 members = ["controller", "metrics-api", "runner"]
 resolver = "2"
 
-# [package]
-# name = "experimentah"
-
 [workspace.package]
-name = "experimentah"
 version = "0.1.0"
 edition = "2021"
 
