@@ -1,5 +1,6 @@
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::{fs, io};
@@ -21,6 +22,25 @@ pub enum ParseError {
         source: toml::de::Error,
     },
     ValidationError(String),
+}
+
+impl ParseError {
+    fn status_code(&self) -> StatusCode {
+        match *self {
+            ParseError::ParseError { ref source, .. } => source.status_code(),
+            ParseError::IOError { .. } => StatusCode::INTERNAL_SERVER_ERROR,
+            ParseError::DeserializeError { .. } => StatusCode::BAD_REQUEST,
+            ParseError::ValidationError(..) => StatusCode::BAD_REQUEST,
+        }
+    }
+}
+
+impl IntoResponse for ParseError {
+    fn into_response(self) -> axum::response::Response {
+        let body = self.to_string();
+        let code = self.status_code();
+        (code, body).into_response()
+    }
 }
 
 impl std::fmt::Display for ParseError {
@@ -103,40 +123,40 @@ impl From<(String, ParseError)> for ParseError {
     }
 }
 
-#[derive(Deserialize, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct Config {
-    pub brain: BrainConfig,
+    // pub brain: BrainConfig,
     pub hosts: Vec<HostConfig>,
     pub runners: Vec<RunnerConfig>,
     pub exporters: Vec<ExporterConfig>,
 }
 
-#[derive(Serialize)]
-pub enum PrometheusRequestBody<'a> {
-    String(String),
-    HashMap(Vec<HashMap<&'a str, String>>),
-}
-
-#[derive(Serialize)]
-pub enum DbSaveRequestBody {
-    String(String),
-    Commands(Vec<String>),
-}
-
-#[derive(Serialize)]
-pub enum CreateJobRequest {
-    String(String),
-    Exporters(Vec<String>),
-    Bool(bool),
-    U8(u8),
-    Timestamp(u128),
-}
-
-#[derive(Serialize)]
-pub enum CreateExperimentRequest {
-    String(String),
-    Time(u128),
-}
+// #[derive(Serialize)]
+// pub enum PrometheusRequestBody<'a> {
+//     String(String),
+//     HashMap(Vec<HashMap<&'a str, String>>),
+// }
+//
+// #[derive(Serialize)]
+// pub enum DbSaveRequestBody {
+//     String(String),
+//     Commands(Vec<String>),
+// }
+//
+// #[derive(Serialize)]
+// pub enum CreateJobRequest {
+//     String(String),
+//     Exporters(Vec<String>),
+//     Bool(bool),
+//     U8(u8),
+//     Timestamp(u128),
+// }
+//
+// #[derive(Serialize)]
+// pub enum CreateExperimentRequest {
+//     String(String),
+//     Time(u128),
+// }
 
 impl FromStr for Config {
     type Err = ParseError;
@@ -158,27 +178,23 @@ impl Config {
     }
 
     fn parse_toml(toml: &str) -> Result<Self> {
-        // let config = toml::from_str::<Self>(toml)
-        //     .map_err(|e| format!("Error parsing config: {e}"))?;
         let config = toml::from_str::<Self>(toml)
             .map_err(|e| ParseError::from(("Error parsing config toml", e)))?;
-
-        Self::validate(&config)?;
         Ok(config)
     }
 
-    pub fn brain_endpoint(&self) -> String {
-        let host_name = &self.brain.host;
-        let url = self
-            .hosts
-            .iter()
-            .find(|host| host.name == *host_name)
-            .map(|host| &host.address)
-            .expect("Couldn't find brain host in config: {host_name}");
-        let port = &self.brain.port;
-
-        format!("http://{}:{}", url, port)
-    }
+    // pub fn brain_endpoint(&self) -> String {
+    //     let host_name = &self.brain.host;
+    //     let url = self
+    //         .hosts
+    //         .iter()
+    //         .find(|host| host.name == *host_name)
+    //         .map(|host| &host.address)
+    //         .expect("Couldn't find brain host in config: {host_name}");
+    //     let port = &self.brain.port;
+    //
+    //     format!("http://{}:{}", url, port)
+    // }
 
     pub fn runner_endpoints(&self) -> Vec<String> {
         let mut urls: Vec<String> = Vec::with_capacity(self.runners.len());
@@ -190,18 +206,19 @@ impl Config {
                 .find(|host| host.name == *runner_host)
                 .map(|host| &host.address)
                 .expect("Unable to find runner host in config: {runner_host}");
+            urls.push(url.clone())
 
-            urls.push(format!("http://{}:{}", url, runner.port));
+            // urls.push(format!("http://{}:{}", url, runner.port));
         }
         urls
     }
 
-    fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> Result<()> {
         for host in self.hosts.iter() {
             host.validate()?;
         }
 
-        self.brain.validate(&self.hosts)?;
+        // self.brain.validate(&self.hosts)?;
 
         for runner in self.runners.iter() {
             runner.validate(&self.hosts)?;
@@ -214,14 +231,15 @@ impl Config {
     }
 }
 
-#[derive(Deserialize, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct BrainConfig {
     pub host: String,
     pub port: u16,
 }
 
 impl BrainConfig {
-    fn validate(&self, hosts: &[ HostConfig ]) -> Result<()> {
+    fn validate(&self, hosts: &[HostConfig]) -> Result<()> {
+        // Check the host exists
         hosts.iter().find(|host| host.name == self.host).ok_or(
             ParseError::ValidationError(format!(
                 "The host for [brain] must be defined: {}",
@@ -232,28 +250,29 @@ impl BrainConfig {
     }
 }
 
-#[derive(Deserialize, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, PartialEq, Debug)]
 pub struct HostConfig {
     pub name: String,
     pub address: String,
-    pub infrastructure: Option<String>,
 }
 
 impl HostConfig {
     fn validate(&self) -> Result<()> {
+        // TODO(joren): The only validation we can do is
+        // check whether we have a valid address
         Ok(())
     }
 }
 
-#[derive(Deserialize, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, PartialEq, Debug)]
 pub struct RunnerConfig {
     pub name: String,
     pub host: String,
-    pub port: u16,
 }
 
 impl RunnerConfig {
-    fn validate(&self, hosts: &[ HostConfig ]) -> Result<()> {
+    fn validate(&self, hosts: &[HostConfig]) -> Result<()> {
+        // Ensure the hosts exist
         hosts.iter().find(|host| host.name == self.host).ok_or(
             ParseError::ValidationError(format!(
                 "The host for runner {} must be defined: {}",
@@ -271,25 +290,19 @@ pub struct ExporterConfig {
     pub command: String,
     #[serde(default)]
     pub setup: Vec<String>,
-    #[serde(default = "ExporterConfig::default_poll_interval")]
-    pub poll_interval: u16,
 }
 
 impl ExporterConfig {
-    fn default_poll_interval() -> u16 {
-        1
-    }
-
     fn validate(&self, hosts: &[HostConfig]) -> Result<()> {
-        let a = shlex::split(&self.command).ok_or(
-            ParseError::ValidationError(format!(
+        // Ensure we have a valid command
+        shlex::split(&self.command).ok_or(ParseError::ValidationError(
+            format!(
                 "Invalid command for exporter {}: {}",
                 self.name, self.command
-            )),
-        )?;
+            ),
+        ))?;
 
-        dbg!(a);
-
+        // Ensure we have valid setup commands
         for command in self.setup.iter() {
             shlex::split(command).ok_or(ParseError::ValidationError(
                 format!(
@@ -299,6 +312,7 @@ impl ExporterConfig {
             ))?;
         }
 
+        // Ensure the hosts exist
         hosts.iter().find(|host| host.name == self.host).ok_or(
             ParseError::ValidationError(format!(
                 "Invalid host definition for exporter {}: {}",
@@ -310,7 +324,7 @@ impl ExporterConfig {
     }
 }
 
-#[derive(Deserialize, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct ExperimentConfig {
     // The ID is generated externally.
     // pub id: Option<String>,
@@ -318,7 +332,9 @@ pub struct ExperimentConfig {
     pub description: String,
     pub kind: String,
     pub execute: PathBuf,
-    pub arguments: Option<u8>,
+    #[serde(default)]
+    pub arguments: Vec<String>,
+    pub expected_arguments: Option<usize>,
     #[serde(default = "ExperimentConfig::default_runs")]
     pub runs: u16,
     #[serde(default)]
@@ -326,7 +342,7 @@ pub struct ExperimentConfig {
     #[serde(default)]
     pub teardown: Vec<RemoteExecutionConfig>,
     #[serde(default)]
-    pub variations: Vec<ExperimentVariation>,
+    pub variations: Vec<VariationConfig>,
     #[serde(default)]
     pub exporters: Vec<String>,
     #[serde(default)]
@@ -334,44 +350,62 @@ pub struct ExperimentConfig {
 }
 
 impl ExperimentConfig {
-    pub fn from_file(file: &Path, config: &Config) -> Result<Self> {
+    pub fn from_file(file: &Path) -> Result<Self> {
         let experiment_config_str =
             std::fs::read_to_string(file).map_err(|e| {
                 ParseError::from(("error reading experiment config file", e))
             })?;
 
-        ExperimentConfig::parse_toml(&experiment_config_str, config).map_err(
-            |e| {
-                ParseError::from((
-                    format!(
-                        "Error in experiment config file {}",
-                        file.to_string_lossy()
-                    ),
-                    e,
-                ))
-            },
-        )
+        ExperimentConfig::parse_toml(&experiment_config_str).map_err(|e| {
+            ParseError::from((
+                format!(
+                    "Error in experiment config file {}",
+                    file.to_string_lossy()
+                ),
+                e,
+            ))
+        })
     }
 
-    fn parse_toml(toml: &str, config: &Config) -> Result<Self> {
+    fn parse_toml(toml: &str) -> Result<Self> {
         let experiment_config = toml::from_str::<Self>(toml).map_err(|e| {
             ParseError::from(("Error parsing experiment config", e))
         })?;
 
-        Self::validate(&experiment_config, config)?;
         Ok(experiment_config)
     }
 
-    pub fn from_str(string: &str, config: &Config) -> Result<Self> {
-        Self::parse_toml(string, config)
+    pub fn from_str(string: &str) -> Result<Self> {
+        Self::parse_toml(string)
     }
 
     fn default_runs() -> u16 {
         1
     }
 
+    fn validate_arguments(
+        name: &str,
+        expected: Option<usize>,
+        args: &[String],
+    ) -> Result<()> {
+        if expected.is_some_and(|a| a != args.len()) {
+            Err(ParseError::ValidationError(format!(
+                "Error in experiment {}: Expected {} arguments, got {}",
+                name,
+                expected.unwrap(),
+                args.len()
+            )))?;
+        }
+        Ok(())
+    }
+
     pub fn validate(&self, config: &Config) -> Result<()> {
-        check_file_exists(&self.execute)?;
+        check_file_exists(&self.execute).map_err(|e| {
+            ParseError::from((
+                format!("Missing files for experiment {}", self.name),
+                e,
+            ))
+        })?;
 
         for setup in self.setup.iter() {
             setup.validate(config).map_err(|e| {
@@ -382,24 +416,34 @@ impl ExperimentConfig {
             })?;
         }
 
-        for variation in self.variations.iter() {
+        ExperimentConfig::validate_arguments(
+            &self.name,
+            self.expected_arguments,
+            &self.arguments,
+        )?;
+
+        for (i, variation) in self.variations.iter().enumerate() {
+            let name = variation.name.as_ref().unwrap_or_else(|| &self.name);
             variation.validate(config).map_err(|e| {
                 ParseError::from((
-                    format!("Invalid variation for experiment {}", self.name),
+                    format!(
+                        "Invalid variation (index {i}) for experiment {}",
+                        self.name
+                    ),
                     e,
                 ))
             })?;
 
+            // Ensures that we have the correct number of arguments (if defined)
+            ExperimentConfig::validate_arguments(
+                name,
+                variation.expected_arguments,
+                &variation.arguments,
+            )?;
+
             if self.runners.is_empty() && variation.runners.is_empty() {
                 return Err(ParseError::ValidationError(format!(
                     "No runners have been defined for experiment {}",
-                    self.name
-                )));
-            }
-
-            if self.arguments.is_none() && variation.arguments.is_none() {
-                return Err(ParseError::ValidationError(format!(
-                    "No arguments have been defined for experiment {}",
                     self.name
                 )));
             }
@@ -436,17 +480,19 @@ impl ExperimentConfig {
 /// specific variation, and exporters will do the same for exporters. It is
 /// an error to not define at least one runner in either the top-level or
 /// in the variation.
-#[derive(Deserialize, Debug, PartialEq)]
-pub struct ExperimentVariation {
-    pub name: String,
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+pub struct VariationConfig {
+    pub name: Option<String>,
     #[serde(default)]
     pub runners: Vec<String>,
-    pub arguments: Option<u8>,
+    pub expected_arguments: Option<usize>,
+    #[serde(default)]
+    pub arguments: Vec<String>,
     #[serde(default)]
     pub exporters: Vec<String>,
 }
 
-impl ExperimentVariation {
+impl VariationConfig {
     pub fn validate(&self, config: &Config) -> Result<()> {
         for runner in self.runners.iter() {
             if !config
@@ -455,8 +501,8 @@ impl ExperimentVariation {
                 .any(|c_runner| c_runner.name == *runner)
             {
                 Err(ParseError::ValidationError(format!(
-                    "Invalid runner definition for variation {}: {}",
-                    self.name, runner
+                    "Invalid runner definition {}",
+                    runner
                 )))?;
             }
         }
@@ -468,8 +514,8 @@ impl ExperimentVariation {
                 .any(|c_exporter| c_exporter.name == *exporter)
             {
                 return Err(ParseError::ValidationError(format!(
-                    "Invalid exporter definition for variation {}: {}",
-                    self.name, exporter
+                    "Invalid exporter definition {}",
+                    exporter
                 )));
             }
         }
@@ -478,7 +524,7 @@ impl ExperimentVariation {
     }
 }
 
-#[derive(Deserialize, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct RemoteExecutionConfig {
     pub runners: Vec<String>,
     pub scripts: Vec<PathBuf>,
@@ -513,98 +559,108 @@ impl RemoteExecutionConfig {
                 )))?;
             }
         }
-        check_files_exist(&self.scripts)?;
+        check_files_exist(&self.scripts).map_err(|e| {
+            ParseError::from(("Missing files for setup/teardown", e))
+        })?;
         Ok(())
     }
 }
 
 #[derive(Debug, PartialEq)]
-pub struct Experiment<'a> {
+pub struct Experiment {
     pub id: Option<String>,
     pub name: String,
-    pub description: &'a str,
-    pub kind: &'a str,
-    pub setup: Vec<RemoteExecution<'a>>,
-    pub teardown: Vec<RemoteExecution<'a>>,
-    pub runners: Vec<Runner<'a>>,
-    pub execute: &'a Path,
-    pub arguments: &'a u8,
-    pub exporters: Vec<Exporter<'a>>,
+    pub description: String,
+    pub kind: String,
+    pub setup: Vec<RemoteExecution>,
+    pub teardown: Vec<RemoteExecution>,
+    pub runners: Vec<Runner>,
+    pub execute: PathBuf,
+    pub arguments: Vec<String>,
+    pub expected_arguments: Option<usize>,
+    pub exporters: Vec<Exporter>,
 }
 
 #[derive(Debug, Hash, Eq, PartialEq)]
-pub struct Runner<'a> {
-    pub name: &'a str,
-    pub address: &'a str,
-    pub port: &'a u16,
+pub struct Runner {
+    pub name: String,
+    pub address: String,
+    // pub port: u16,
 }
 
-impl<'a> Runner<'a> {
-    pub fn new(name: &'a str, address: &'a str, port: &'a u16) -> Self {
-        Self {
-            name,
-            address,
-            port,
-        }
-    }
+impl Runner {
+    // pub fn new(name: &'a str, address: &'a str, port: &'a u16) -> Self {
+    //     Self {
+    //         name,
+    //         address,
+    //         port,
+    //     }
+    // }
 
-    pub fn url(&self) -> String {
-        format!("http://{}:{}", self.address, self.port)
-    }
+    // pub fn url(&self) -> String {
+    //     format!("http://{}:{}", self.address, self.port)
+    // }
 }
+
+// #[derive(Debug, Hash, Eq, PartialEq)]
+// pub struct Runner<'a> {
+//     pub name: &'a str,
+//     pub address: &'a str,
+//     pub port: &'a u16,
+// }
+//
+// impl<'a> Runner<'a> {
+//     pub fn new(name: &'a str, address: &'a str, port: &'a u16) -> Self {
+//         Self {
+//             name,
+//             address,
+//             port,
+//         }
+//     }
+//
+//     pub fn url(&self) -> String {
+//         format!("http://{}:{}", self.address, self.port)
+//     }
+// }
 
 #[derive(Debug, PartialEq)]
-pub struct Exporter<'a> {
-    pub name: &'a str,
-    pub address: &'a str,
-    pub command: &'a str,
-    pub setup: Vec<&'a str>,
-    pub poll_interval: &'a u16,
+pub struct Exporter {
+    pub name: String,
+    pub address: String,
+    pub command: String,
+    pub setup: Vec<String>,
 }
 
-impl<'a> Exporter<'a> {
+impl Exporter {
     fn new(
-        name: &'a str,
-        address: &'a str,
-        command: &'a str,
-        setup: &'a [String],
-        poll_interval: &'a u16,
+        name: String,
+        address: String,
+        command: String,
+        setup: Vec<String>,
     ) -> Self {
-        let mapped_setup = setup
-            .iter()
-            .map(|command| command.as_str())
-            .collect::<Vec<&'a str>>();
-
         Self {
             name,
             address,
             command,
-            setup: mapped_setup,
-            poll_interval,
+            setup,
         }
     }
 }
 #[derive(Debug, PartialEq)]
-pub struct RemoteExecution<'a> {
-    pub runners: Vec<Runner<'a>>,
-    pub scripts: Vec<&'a Path>,
+pub struct RemoteExecution {
+    pub runners: Vec<Runner>,
+    pub scripts: Vec<PathBuf>,
 }
 
-impl<'a> RemoteExecution<'a> {
-    fn new(runners: Vec<Runner<'a>>, scripts: &'a [PathBuf]) -> Self {
-        let mapped_scripts =
-            scripts.iter().map(|script| script.as_path()).collect();
-        Self {
-            runners,
-            scripts: mapped_scripts,
-        }
+impl RemoteExecution {
+    fn new(runners: Vec<Runner>, scripts: Vec<PathBuf>) -> Self {
+        // let mapped_scripts =
+        //     scripts.iter().map(|script| script.as_path()).collect();
+        Self { runners, scripts }
     }
 }
 
-fn map_runners<'a>(
-    config: &'a Config,
-    runners: &'a [ String ],
-) -> Vec<Runner<'a>> {
+fn map_runners(config: &Config, runners: &[String]) -> Vec<Runner> {
     let mut mapped_runners = Vec::with_capacity(runners.len());
     for c_runner in config.runners.iter() {
         for runner in runners.iter() {
@@ -616,21 +672,18 @@ fn map_runners<'a>(
                     .expect(
                         "We should not fail to cross-reference at this point.",
                     );
-                mapped_runners.push(Runner::new(
-                    &c_runner.name,
-                    &host.address,
-                    &c_runner.port,
-                ));
+                mapped_runners.push(Runner {
+                    name: c_runner.name.clone(),
+                    address: host.address.clone(),
+                    // port: c_runner.port,
+                });
             }
         }
     }
     mapped_runners
 }
 
-fn map_exporters<'a>(
-    config: &'a Config,
-    exporters: &'a [String],
-) -> Vec<Exporter<'a>> {
+fn map_exporters(config: &Config, exporters: &[String]) -> Vec<Exporter> {
     let mut mapped_exporters = Vec::with_capacity(exporters.len());
     for c_exporter in config.exporters.iter() {
         for exporter in exporters.iter() {
@@ -643,11 +696,10 @@ fn map_exporters<'a>(
                         "We should not fail to cross-reference at this point.",
                     );
                 mapped_exporters.push(Exporter::new(
-                    &c_exporter.name,
-                    &host.address,
-                    &c_exporter.command,
-                    &c_exporter.setup,
-                    &c_exporter.poll_interval,
+                    c_exporter.name.to_string(),
+                    host.address.to_string(),
+                    c_exporter.command.to_string(),
+                    c_exporter.setup.clone(),
                 ));
             }
         }
@@ -655,10 +707,10 @@ fn map_exporters<'a>(
     mapped_exporters
 }
 
-fn map_remote_executions<'a>(
-    config: &'a Config,
-    remote_executions: &'a [RemoteExecutionConfig],
-) -> Vec<RemoteExecution<'a>> {
+fn map_remote_executions(
+    config: &Config,
+    remote_executions: &[RemoteExecutionConfig],
+) -> Vec<RemoteExecution> {
     let mut mapped_remote_executions =
         Vec::with_capacity(remote_executions.len());
     for remote_execution in remote_executions.iter() {
@@ -668,113 +720,90 @@ fn map_remote_executions<'a>(
             for runner in remote_execution.runners.iter() {
                 if c_runner.name == *runner {
                     let host = config.hosts.iter().find(|host| host.name == c_runner.host).expect("We should not fail to cross-reference at this point.");
-                    mapped_runners.push(Runner::new(
-                        &c_runner.name,
-                        &host.address,
-                        &c_runner.port,
-                    ));
+                    mapped_runners.push(Runner {
+                        name: c_runner.name.clone(),
+                        address: host.address.clone(),
+                        // port: c_runner.port,
+                    });
                 }
             }
         }
         mapped_remote_executions.push(RemoteExecution::new(
             mapped_runners,
-            &remote_execution.scripts,
+            remote_execution.scripts.clone(),
         ));
     }
     mapped_remote_executions
 }
 
-pub fn to_experiments<'a>(
-    config: &'a Config,
-    experiment_config: &'a ExperimentConfig,
-) -> Vec<Experiment<'a>> {
+pub type ExperimentRuns = (u16, Vec<Experiment>);
+
+pub fn generate_experiments(
+    config: &Config,
+    experiment_config: &ExperimentConfig,
+) -> ExperimentRuns {
     let name = &experiment_config.name;
     let description = &experiment_config.description;
     let kind = &experiment_config.kind;
     let execute = &experiment_config.execute;
-    let arguments = &experiment_config.arguments;
     let setup = &experiment_config.setup;
     let teardown = &experiment_config.teardown;
     let variations = &experiment_config.variations;
-    let exporters = &experiment_config.exporters;
-    let runners = &experiment_config.runners;
 
-    let with_base: bool = !runners.is_empty() && arguments.is_some();
-    let num_experiments = if with_base {
-        variations.len() + 1
-    } else {
-        variations.len()
-    };
+    let mut experiments = Vec::with_capacity(variations.len());
 
-    let mut experiments = Vec::with_capacity(num_experiments);
-    if with_base {
+    for variation in experiment_config.variations.iter() {
+        let name = match &variation.name {
+            Some(name) => name,
+            None => name,
+        };
+        let expected_arguments = variation
+            .expected_arguments
+            .or(experiment_config.expected_arguments);
+
+        let arguments = match variation.runners.is_empty() {
+            true => &experiment_config.arguments,
+            false => &variation.arguments,
+        };
+        let runners = match variation.runners.is_empty() {
+            true => &experiment_config.runners,
+            false => &variation.runners,
+        };
+        let exporters = match variation.exporters.is_empty() {
+            true => &experiment_config.exporters,
+            false => &variation.exporters,
+        };
+
         experiments.push(Experiment {
             id: None,
             name: name.clone(),
-            description,
-            kind,
+            description: description.clone(),
+            kind: kind.clone(),
             setup: map_remote_executions(config, setup),
             teardown: map_remote_executions(config, teardown),
             runners: map_runners(config, runners),
-            execute,
-            arguments: arguments.as_ref().unwrap(),
+            execute: execute.clone(),
+            expected_arguments: expected_arguments,
+            arguments: arguments.clone(),
             exporters: map_exporters(config, exporters),
         });
     }
-
-    for variation in experiment_config.variations.iter() {
-        let name = format!("{name}{}", variation.name);
-        let arguments = variation
-            .arguments
-            .as_ref()
-            .or(experiment_config.arguments.as_ref());
-        let runners = if !variation.runners.is_empty() {
-            &variation.runners
-        } else {
-            &experiment_config.runners
-        };
-        let exporters = if !variation.exporters.is_empty() {
-            &variation.exporters
-        } else {
-            &experiment_config.exporters
-        };
-        experiments.push(Experiment {
-            id: None,
-            name,
-            description,
-            kind,
-            setup: map_remote_executions(config, setup),
-            teardown: map_remote_executions(config, teardown),
-            runners: map_runners(config, runners),
-            execute,
-            arguments: arguments.unwrap(),
-            exporters: map_exporters(config, exporters),
-    });
-    }
-    experiments
+    (experiment_config.runs, experiments)
 }
 
-fn check_file_exists(file: &Path) -> Result<()> {
-    let exists = file.try_exists().map_err(|e| {
-        ParseError::from((
-            format!(
-                "Unable to verify if file {} exists",
-                file.to_string_lossy()
-            ),
-            e,
-        ))
-    })?;
+fn check_file_exists(file: &Path) -> io::Result<()> {
+    let exists = file.try_exists()?;
 
     match exists {
         true => Ok(()),
-        false => Err(ParseError::from((
-            "File {} does not exist",
-            std::io::Error::new(std::io::ErrorKind::NotFound, ""),
-        ))),
+        false => Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("File {} does not exist", file.to_string_lossy()),
+        )),
     }
 }
 
-fn check_files_exist(files: &[ PathBuf ]) -> Result<()> {
+fn check_files_exist(files: &[PathBuf]) -> io::Result<()> {
     for file in files.iter() {
         check_file_exists(file)?;
     }
@@ -788,32 +817,40 @@ mod tests {
     use std::path::PathBuf;
     use std::str::FromStr;
 
+    const TEST_PATH: &str = "test";
+    const VALID_CONFIG: &str = "valid_config.toml";
+    const VALID_EXPERIMENT_CONFIG: &str = "valid_experiment_config.toml";
+    const INVALID_CONFIG: &str = "invalid_config.toml";
+    const INVALID_EXPERIMENT_CONFIG: &str = "invalid_experiment_config.toml";
+
     fn test_path() -> PathBuf {
-        PathBuf::from_str("test").expect("Failed to parse test_path")
+        PathBuf::from_str(TEST_PATH).expect("Failed to parse test_path")
     }
 
     #[test]
     fn parse_config() {
-        let config =
-            match Config::from_file(&test_path().join("test_config.toml")) {
-                Ok(config) => config,
-                Err(e) => panic!("A valid config failed to be validated: {e}"),
-            };
+        let config = match Config::from_file(&test_path().join(VALID_CONFIG)) {
+            Ok(config) => config,
+            Err(e) => panic!("A valid config failed to be validated: {e}"),
+        };
+
+        if let Err(e) = config.validate() {
+            panic!("Unable to validate config: {e}");
+        }
 
         let expected_config = Config {
             hosts: vec![HostConfig {
                 name: "localhost".to_string(),
                 address: "localhost".to_string(),
-                infrastructure: Some("linux".to_string()),
             }],
-            brain: BrainConfig {
-                host: "localhost".to_string(),
-                port: 50000,
-            },
+            // brain: BrainConfig {
+            //     host: "localhost".to_string(),
+            //     port: 50000,
+            // },
             runners: vec![RunnerConfig {
                 name: "runner1".to_string(),
                 host: "localhost".to_owned(),
-                port: 50001,
+                // port: 50001,
             }],
             exporters: vec![
                 ExporterConfig {
@@ -824,14 +861,12 @@ mod tests {
                         "dnf install -y sysstat".into(),
                         "apt install -y sysstat".into(),
                     ],
-                    poll_interval: 1,
                 },
                 ExporterConfig {
                     name: "another-test-exporter".to_string(),
                     host: "localhost".into(),
                     command: "my_collector".into(),
                     setup: vec![],
-                    poll_interval: 1,
                 },
             ],
         };
@@ -843,22 +878,28 @@ mod tests {
 
     #[test]
     fn parse_experiment_config() {
-        let config_path = test_path().join("test_config.toml");
-        let experiment_config_path =
-            test_path().join("test_experiment_config.toml");
+        let config_path = test_path().join(VALID_CONFIG);
+        let experiment_config_path = test_path().join(VALID_EXPERIMENT_CONFIG);
         let config = match Config::from_file(&config_path) {
             Ok(config) => config,
-            Err(e) => panic!("A valid config failed to be validated: {e}"),
+            Err(e) => panic!("A valid config couldn't be parsed: {e}"),
         };
 
+        if let Err(e) = config.validate() {
+            panic!("Unable to validate config: {e}");
+        }
+
         let experiment_config =
-            match ExperimentConfig::from_file(&experiment_config_path, &config)
-            {
+            match ExperimentConfig::from_file(&experiment_config_path) {
                 Ok(experiment_config) => experiment_config,
-                Err(e) => panic!(
-                    "A valid experiment config failed to be validated: {e}"
-                ),
+                Err(e) => {
+                    panic!("A valid experiment config couldn't be parsed: {e}")
+                }
             };
+
+        if let Err(e) = experiment_config.validate(&config) {
+            panic!("Unable to validate experiment config: {e}");
+        }
 
         let runners = vec!["runner1".into()];
         let expected_experiment_config = ExperimentConfig {
@@ -866,7 +907,8 @@ mod tests {
                 description: "Testing the functionality of the software completely using localhost".into(),
                 kind: "localhost-result".into(),
                 execute: "./scripts/actual-work.sh".into(),
-                arguments: Some(1),
+                expected_arguments: Some(2),
+                arguments: vec!["Argument 1".into(), "Argument 2".into()],
                 exporters: vec![],
                 runners: runners.clone(),
                 runs: 1,
@@ -875,23 +917,33 @@ mod tests {
                         scripts: vec!["./scripts/test-setup.sh".into()]
                     }
                 ],
-                variations: vec![ExperimentVariation {
-                        name: "different arg".into(),
+                variations: vec![VariationConfig {
+                    name: None,
+                    runners: vec![],
+                    expected_arguments: None,
+                    arguments: vec![],
+                    exporters: vec![]
+                    },
+                    VariationConfig {
+                        name: Some("different args".into()),
                         runners: vec![],
-                        arguments: Some(0),
+                        expected_arguments: Some(1),
+                        arguments: vec!["Argument 1".into()],
                         exporters: vec![]
                     },
-                    ExperimentVariation {
-                        name: "with exporter".into(),
+                    VariationConfig {
+                        name: Some("with exporter".into()),
                         runners: vec![],
-                        arguments: None,
-                        exporters: vec!["test-exporter".into()] 
+                        expected_arguments: None,
+                        arguments: vec![],
+                        exporters: vec!["test-exporter".into()]
                     },
-                    ExperimentVariation {
-                        name: "with multiple exporters".into(),
+                    VariationConfig {
+                        name: Some("with multiple exporters".into()),
                         runners: vec![],
-                        arguments: Some(1),
-                        exporters: vec!["test-exporter".into(), "another-test-exporter".into()] 
+                        expected_arguments: None,
+                        arguments: vec![],
+                        exporters: vec!["test-exporter".into(), "another-test-exporter".into()]
                     }
                 ],
                 teardown: vec![RemoteExecutionConfig{
@@ -908,168 +960,175 @@ mod tests {
 
     #[test]
     fn to_experiments() {
-        let config_path = test_path().join("test_config.toml");
-        let experiment_config_path =
-            test_path().join("test_experiment_config.toml");
+        let config_path = test_path().join(VALID_CONFIG);
+        let experiment_config_path = test_path().join(VALID_EXPERIMENT_CONFIG);
         let config = match Config::from_file(&config_path) {
             Ok(config) => config,
-            Err(e) => panic!("A valid config failed to be validated: {e}"),
+            Err(e) => panic!("A valid config couldn't be parsed: {e}"),
         };
 
+        if let Err(e) = config.validate() {
+            panic!("Unable to validate config: {e}");
+        }
+
         let experiment_config =
-            match ExperimentConfig::from_file(&experiment_config_path, &config)
-            {
+            match ExperimentConfig::from_file(&experiment_config_path) {
                 Ok(experiment_config) => experiment_config,
-                Err(e) => panic!(
-                    "A valid experiment config failed to be validated: {e}"
-                ),
+                Err(e) => {
+                    panic!("A valid experiment config couldn't be parsed: {e}")
+                }
             };
 
-        let experiments = super::to_experiments(&config, &experiment_config);
+        if let Err(e) = experiment_config.validate(&config) {
+            panic!("Unable to validate experiment config: {e}");
+        }
+
+        let experiments =
+            super::generate_experiments(&config, &experiment_config);
         let expected_experiments = vec![
             Experiment {
                 id: None,
                 name: "localhost-experiment".to_string(),
-                description: "Testing the functionality of the software completely using localhost",
-                kind: "localhost-result",
+                description: "Testing the functionality of the software completely using localhost".into(),
+                kind: "localhost-result".into(),
                 setup: vec![RemoteExecution{
-                runners: vec![Runner {
-                name: "runner1",
-                address: "localhost",
-                port: &50001},
+                    runners: vec![Runner {
+                    name: "runner1".into(),
+                    address: "localhost".into() },
+                    ],
+                    scripts: vec![PathBuf::from("./scripts/test-setup.sh")]}
                 ],
-                scripts: vec![Path::new("./scripts/test-setup.sh")]}],
                 teardown: vec![RemoteExecution{
                     runners: vec![Runner {
-                        name: "runner1",
-                        address: "localhost",
-                        port: &50001
+                        name: "runner1".into(),
+                        address: "localhost".into(),
                     }],
-                    scripts: vec![Path::new("./scripts/test-teardown.sh")]
+                    scripts: vec![PathBuf::from("./scripts/test-teardown.sh")]
                 }],
                 runners: vec![Runner {
-                    name: "runner1",
-                    address: "localhost",
-                    port: &50001,
+                    name: "runner1".into(),
+                    address: "localhost".into(),
                     }],
 
-                execute: Path::new("./scripts/actual-work.sh"),
-                arguments: &1,
+                execute: PathBuf::from("./scripts/actual-work.sh"),
+                expected_arguments: Some(2),
+                arguments: vec!["Argument 1".into(), "Argument 2".into()],
                 exporters: vec![]
             },
             Experiment {
                 id: None,
-                name: "localhost-experimentdifferent arg".to_string(),
-                description: "Testing the functionality of the software completely using localhost",
-                kind: "localhost-result",
+                name: "different args".to_string(),
+                description: "Testing the functionality of the software completely using localhost".into(),
+                kind: "localhost-result".into(),
                 setup: vec![RemoteExecution{
                 runners: vec![Runner {
-                name: "runner1",
-                address: "localhost",
-                port: &50001},
+                name: "runner1".into(),
+                address: "localhost".into(),
+                },
                 ],
-                scripts: vec![Path::new("./scripts/test-setup.sh")]}],
+                scripts: vec![PathBuf::from("./scripts/test-setup.sh")]}],
                 teardown: vec![RemoteExecution{
                     runners: vec![Runner {
-                        name: "runner1",
-                        address: "localhost",
-                        port: &50001
+                        name: "runner1".into(),
+                        address: "localhost".into(),
                     }],
-                    scripts: vec![Path::new("./scripts/test-teardown.sh")]
+                    scripts: vec![PathBuf::from("./scripts/test-teardown.sh")]
                 }],
                 runners: vec![Runner {
-                    name: "runner1",
-                    address: "localhost",
-                    port: &50001,
+                    name: "runner1".into(),
+                    address: "localhost".into(),
                     }],
 
-                execute: Path::new("./scripts/actual-work.sh"),
-                arguments: &0,
+                execute: PathBuf::from("./scripts/actual-work.sh"),
+                arguments: vec!["Argument 1".into(), "Argument 2".into()],
+                expected_arguments: Some(1),
                 exporters: vec![]
             },
             Experiment {
                 id: None,
-                name: "localhost-experimentwith exporter".to_string(),
-                description: "Testing the functionality of the software completely using localhost",
-                kind: "localhost-result",
+                name: "with exporter".to_string(),
+                description: "Testing the functionality of the software completely using localhost".into(),
+                kind: "localhost-result".into(),
                 setup: vec![RemoteExecution{
                 runners: vec![Runner {
-                name: "runner1",
-                address: "localhost",
-                port: &50001},
+                name: "runner1".into(),
+                address: "localhost".into(),
+                },
                 ],
-                scripts: vec![Path::new("./scripts/test-setup.sh")]}],
+                scripts: vec![PathBuf::from("./scripts/test-setup.sh")]}],
                 teardown: vec![RemoteExecution{
                     runners: vec![Runner {
-                        name: "runner1",
-                        address: "localhost",
-                        port: &50001
+                        name: "runner1".into(),
+                        address: "localhost".into(),
                     }],
-                    scripts: vec![Path::new("./scripts/test-teardown.sh")]
+                    scripts: vec![PathBuf::from("./scripts/test-teardown.sh")]
                 }],
                 runners: vec![Runner {
-                    name: "runner1",
-                    address: "localhost",
-                    port: &50001,
+                    name: "runner1".into(),
+                    address: "localhost".into(),
                     }],
 
-                execute: Path::new("./scripts/actual-work.sh"),
-                arguments: &1,
+                execute: PathBuf::from("./scripts/actual-work.sh"),
+                expected_arguments: Some(2),
+                arguments: vec!["Argument 1".into(), "Argument 2".into()],
                 exporters: vec![Exporter{
-                    name: "test-exporter",
-                    address: "localhost",
-                    command: "sar -o collection.bin",
-                    setup: vec!["dnf install -y sysstat", "apt install -y sysstat"],
-                    poll_interval: &1
+                    name: "test-exporter".into(),
+                    address: "localhost".into(),
+                    command: "sar -o collection.bin".into(),
+                    setup: vec!["dnf install -y sysstat".into(), "apt install -y sysstat".into()],
                 }]
             },
             Experiment {
                 id: None,
-                name: "localhost-experimentwith multiple exporters".to_string(),
-                description: "Testing the functionality of the software completely using localhost",
-                kind: "localhost-result",
+                name: "with multiple exporters".to_string(),
+                description: "Testing the functionality of the software completely using localhost".into(),
+                kind: "localhost-result".into(),
                 setup: vec![RemoteExecution{
                 runners: vec![Runner {
-                name: "runner1",
-                address: "localhost",
-                port: &50001},
+                name: "runner1".into(),
+                address: "localhost".into(),
+                },
                 ],
-                scripts: vec![Path::new("./scripts/test-setup.sh")]}],
+                scripts: vec![PathBuf::from("./scripts/test-setup.sh")]}],
                 teardown: vec![RemoteExecution{
                     runners: vec![Runner {
-                        name: "runner1",
-                        address: "localhost",
-                        port: &50001
+                        name: "runner1".into(),
+                        address: "localhost".into(),
                     }],
-                    scripts: vec![Path::new("./scripts/test-teardown.sh")]
+                    scripts: vec![PathBuf::from("./scripts/test-teardown.sh")]
                 }],
                 runners: vec![Runner {
-                    name: "runner1",
-                    address: "localhost",
-                    port: &50001,
+                    name: "runner1".into(),
+                    address: "localhost".into(),
                     }],
 
-                execute: Path::new("./scripts/actual-work.sh"),
-                arguments: &1,
+                execute: PathBuf::from("./scripts/actual-work.sh"),
+                expected_arguments: Some(2),
+                arguments: vec!["Argument 1".into(), "Argument 2".into()],
                 exporters: vec![Exporter{
-                    name: "test-exporter",
-                    address: "localhost",
-                    command: "sar -o collection.bin",
-                    setup: vec!["dnf install -y sysstat", "apt install -y sysstat"],
-                    poll_interval: &1
+                    name: "test-exporter".into(),
+                    address: "localhost".into(),
+                    command: "sar -o collection.bin".into(),
+                    setup: vec!["dnf install -y sysstat".into(), "apt install -y sysstat".into()],
                 },
-                    Exporter { 
-                        name: "another-test-exporter",
+                    Exporter {
+                        name: "another-test-exporter".into(),
                         address: "localhost".into(),
                         command: "my_collector".into(),
                         setup: vec![],
-                        poll_interval: &1 
                 }]
             },
         ];
 
-        assert_eq!(experiments, expected_experiments,
-            "Experiments did not match\nActual\n{experiments:#?}\nExpected\n{expected_experiments:#?}"
+        let expected_runs = 1;
+        assert_eq!(experiments.0, expected_runs,
+            "Experiment runs did not match\nActual\n{:#?}\nExpected\n{expected_runs:#?}",
+            experiments.0
+        );
+
+        assert_eq!(experiments.1, expected_experiments,
+            "Experiments did not match\nActual\n{:#?}\nExpected\n{expected_experiments:#?}",
+            experiments.1
         )
     }
 }
