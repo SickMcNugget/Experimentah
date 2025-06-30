@@ -1,17 +1,15 @@
 // use futures_core::stream::Stream;
-use futures::future;
 use futures_util::StreamExt;
 use openssh::{Error, KnownHosts, Session};
 use openssh_sftp_client::{
-    fs::{Dir, DirEntry, ReadDir},
-    OpensshSession, Sftp, SftpOptions,
+    fs::Dir,
+    Sftp, SftpOptions,
 };
-use std::collections::HashMap;
+use std::{collections::HashMap, fs};
 use std::fmt;
-use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
-use tokio::task::{self, JoinError, JoinHandle};
+use tokio::task::{self, JoinHandle};
 
 // Bit ugly, but we need separate maps for the normal Sessions and SFTP ones.
 type SessionMap = HashMap<String, Arc<Session>>;
@@ -180,13 +178,16 @@ fn run_local_command_async(cmd: &String, args: &Option<Vec<String>>) -> JoinHand
 
         // TODO: Add some arg validation
         if let Some(arg_vals) = &args_c {
-            println!("Added args {:?}", arg_vals);
+            println!("Run added args {:?}", arg_vals);
             cmd_build.args(arg_vals);
         }
 
         // Run and collect stdout/stderr
         match cmd_build.output() {
             Ok(out) => {
+                if out.status.success() {
+                    return; 
+                }
                 let out_str = match String::from_utf8(out.stderr) {
                     Ok(x) => x,
                     Err(_) => panic!(
@@ -195,7 +196,12 @@ fn run_local_command_async(cmd: &String, args: &Option<Vec<String>>) -> JoinHand
                        &args_c 
                     ),
                 };
-                println!("Output is {}", out_str);
+                let status_msg = if let Some(status) = out.status.code() { 
+                    status.to_string()
+                } else { 
+                    "(signal terminated)".to_string()
+            };
+            panic!("Command {} failed with status {:?}; stderr is {}",&cmd_c, status_msg, out_str);
             }
             Err(e) => {
                 panic!(
@@ -239,18 +245,25 @@ pub async fn read_remote_dir(dir: &Dir) {
 /// Format scp -r  
 pub async fn retrieve_dir_all_remotes(
     s: &SessionMap,
-    srcpath: &String, // e.g. /srv/data
-    dstpath: &String, // e.g. ~/results
+    remote_path: &String, // e.g. (Remote) /srv/data
+    local_path: &String, // e.g. (Local) ~/results 
 ) -> Result<(), AnyError> {
     let scp_cmd = String::from("scp");
     let args = vec!["-r".to_string()];
-    run_remote_command_on_group(
+    let ex = fs::exists(local_path)?;
+    if !ex { 
+        match fs::create_dir_all(local_path) { 
+            Ok(_) => {}, 
+            Err(e) => eprintln!("Failed to create dir {} (may already exist).", local_path),
+        } 
+    } 
+    run_local_command_on_group(
         &scp_cmd,
         &s,
         &Some(args),
         Some(move |host: &String| -> Vec<String> {
-            let full_src = format!("{}:{}", host.clone(), srcpath.clone());
-            let full_dst = format!("{}", dstpath.clone());
+            let full_src = format!("{}:{}", host.clone(), remote_path.clone());
+            let full_dst = format!("{}/{}", local_path.clone(),host.clone(),);
             vec![full_src.clone(), full_dst.clone()]
         }),
     )
@@ -258,33 +271,8 @@ pub async fn retrieve_dir_all_remotes(
     Ok(())
 }
 
-// pub async fn retrieve_remote_file(
-//     s: &Sftp,
-//     srcpath: &str,
-//     dstpath: &str,
-// ) -> Result<(), AnyError> {
-//     if !s.support_copy() {
-//         return Err("Sftp handler doesn't support copying.".into());
-//     }
-//
-//     let remote_path = Path::new(srcpath);
-//     // let file = s.open(remote_path).await?;
-//
-//     let local_path = Path::new(dstpath);
-//     // TODO: For some reason, it doesn't seem like the SFTP library supports
-//     // copying a remote file to a local one - I must just be misreading the
-//     // copy_to function, but it does seem like the one thing it should do.
-//     // Anyway, if that does work change the current implementation to that.
-//     //
-//     // file.copy_to(local_path);
-//
-//     Ok(())
-// }
 #[cfg(test)]
 mod tests {
-    use futures_util::StreamExt;
-    use openssh_sftp_client::fs::ReadDir;
-
     use super::*;
 
     // Implicitly tested in the run_* tests
@@ -386,6 +374,9 @@ mod tests {
             assert!(get_remote_dir(&ss, "/proc\0bablyshouldntexist\0")
                 .await
                 .is_err());
+            assert!(get_remote_dir(&ss, "/proc\0/proc/stat\0")
+                .await
+                .is_err());
         }
         let dir_result = retrieve_dir_all_remotes(
             &s_group,
@@ -393,6 +384,22 @@ mod tests {
             &"test/".to_string(),
         )
         .await;
-        assert!(dir_result.is_err())
+        assert!(dir_result.is_err());
+
+        let test_dir = "./test";
+        // Delete the testing folder if it exists 
+        if fs::exists(test_dir).expect("Path should exist or not.") {
+            fs::remove_dir_all(test_dir).expect("Deletion of test folder (./test) should be fine.");
+        }
+        let dir_result = retrieve_dir_all_remotes(
+            &s_group,
+            &"/etc/hostname".to_string(),
+            &test_dir.to_string(),
+        )
+        .await;
+        assert!(dir_result.is_ok());
+        assert!(fs::exists(test_dir).expect("Path should exist.")); 
+        assert!(fs::exists(format!("{}/p1", test_dir)).expect("Path should exist.")); 
+        assert!(fs::exists(format!("{}/p2", test_dir)).expect("Path should exist.")); 
     }
 }
