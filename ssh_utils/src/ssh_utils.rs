@@ -57,6 +57,9 @@ pub async fn connect_to_group(
 }
 
 // Runs command simultaneously on each specified host.
+/// Note: this currently doesn't crash if the command fails, and prints the stderr instead.
+/// It could be changed to panic on command failure, but some programs print to stderr deliberately
+/// (e.g. time).
 pub async fn run_remote_command_on_group<F>(
     cmd: &String,
     group: &SessionMap,
@@ -219,10 +222,12 @@ pub async fn close_group_sessions(group: SessionMap) -> Result<(), Error> {
     Ok(())
 }
 
-pub async fn get_remote_dir(s: &Sftp, dpath: &str) -> Result<Dir, AnyError> {
+/// Returns a Dir object from a directory string, or an error if it fails. 
+pub async fn get_remote_dir_obj(s: &Sftp, dpath: &str) -> Result<Dir, AnyError> {
     Ok(s.fs().open_dir(dpath).await?)
 }
 
+/// Prints all files in a directory.
 pub async fn read_remote_dir(dir: &Dir) {
     let read_dir = dir.clone().read_dir();
     // TODO: Consumes, but would rather it not. Can't find a way to do that though.
@@ -248,8 +253,8 @@ pub async fn retrieve_dir_all_remotes(
     remote_path: &String, // e.g. (Remote) /srv/data
     local_path: &String, // e.g. (Local) ~/results 
 ) -> Result<(), AnyError> {
-    let scp_cmd = String::from("scp");
-    let args = vec!["-r".to_string()];
+    // let scp_cmd = String::from("scp");
+    // let args = vec!["-r".to_string()];
     let ex = fs::exists(local_path)?;
     if !ex { 
         match fs::create_dir_all(local_path) { 
@@ -257,20 +262,82 @@ pub async fn retrieve_dir_all_remotes(
             Err(e) => eprintln!("Failed to create dir {} (may already exist).", local_path),
         } 
     } 
-    run_local_command_on_group(
-        &scp_cmd,
-        &s,
-        &Some(args),
-        Some(move |host: &String| -> Vec<String> {
-            let full_src = format!("{}:{}", host.clone(), remote_path.clone());
-            let full_dst = format!("{}/{}", local_path.clone(),host.clone(),);
-            vec![full_src.clone(), full_dst.clone()]
-        }),
+    // run_local_command_on_group(
+    //     &scp_cmd,
+    //     &s,
+    //     &Some(args),
+    //     Some(move |host: &String| -> Vec<String> {
+    //         let full_src = format!("{}:{}", host.clone(), remote_path.clone());
+    //         let full_dst = format!("{}/{}", local_path.clone(),host.clone(),);
+    //         vec![full_src.clone(), full_dst.clone()]
+    //     }),
+    // )
+    local_scp_over_group(s,
+        move |host: &String| -> Vec<String> {
+            let full_remote = format!("{}:{}", host.clone(), remote_path.clone());
+            let full_local = format!("{}/{}", local_path.clone(),host.clone(),);
+            vec![full_remote.clone(), full_local.clone()]
+        },
     )
     .await?;
     Ok(())
 }
 
+/// Runs scp -r on the local host, across each target in the group. 
+/// This function takes a closure 'f' returning a Vec; from this vec 'closure_vec', the command will run: 
+///     scp -r closure_vec[0] closure_vec[1]
+pub async fn local_scp_over_group<F>(
+    s: &SessionMap,
+    f: F
+) -> Result<(), AnyError>
+where
+    F: Fn(&String) -> Vec<String>,
+{
+    let scp_cmd = String::from("scp");
+    let args = vec!["-r".to_string()];
+    run_local_command_on_group(
+        &scp_cmd,
+        &s,
+        &Some(args),
+        Some(f),
+    )
+    .await?;
+    Ok(())
+} 
+
+
+pub async fn upload_dir_all_remotes(
+    s: &SessionMap,
+    local_path: &String, // e.g. (Local) ~/results 
+    remote_path: &String, // e.g. (Remote) /srv/data
+) -> Result<(), AnyError> {
+    // Check the directory to upload exists
+    let ex = fs::exists(local_path)?;
+    local_scp_over_group(s,
+        move |host: &String| -> Vec<String> {
+            let full_remote = format!("{}:{}", host.clone(), remote_path.clone());
+            vec![local_path.clone(), full_remote.clone()]
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+pub async fn delete_dir_all_remotes(s: &SessionMap, remote_path: &String) -> Result<(),AnyError> {
+    run_remote_command_on_group::<fn(&String) -> Vec<String>>(&String::from("rm"), &s, &Some(vec!["-r".to_string(), remote_path.clone()]), None).await
+}
+
+pub async fn dir_exists_all_remotes(s: &SFTPMap, remote_path: &String) -> bool { 
+    for (host, ss) in s.iter() {
+        let  cur_fs = ss.fs();
+        let pwd = cur_fs.cwd();
+        println!("Host {} currently at {:?}", host, pwd);
+        if get_remote_dir_obj(&ss, &remote_path).await.is_err() { 
+            return false;
+        } 
+    }
+    true
+} 
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -360,21 +427,21 @@ mod tests {
         let (s_group, sftp_group) = group_res.unwrap();
 
         for (host, ss) in sftp_group.into_iter() {
-            let mut cur_fs = ss.fs();
+            let  cur_fs = ss.fs();
             let pwd = cur_fs.cwd();
             println!("Host {} currently at {:?}", host, pwd);
             assert_eq!(pwd.to_str().unwrap(), "");
 
-            assert!(get_remote_dir(&ss, "/tmp").await.is_ok());
-            assert!(get_remote_dir(&ss, "/root").await.is_ok());
-            assert!(get_remote_dir(&ss, "/home").await.is_ok());
+            assert!(get_remote_dir_obj(&ss, "/tmp").await.is_ok());
+            assert!(get_remote_dir_obj(&ss, "/root").await.is_ok());
+            assert!(get_remote_dir_obj(&ss, "/home").await.is_ok());
 
-            assert!(get_remote_dir(&ss, "/abcdef_ghijk").await.is_err());
-            assert!(get_remote_dir(&ss, "hello123").await.is_err());
-            assert!(get_remote_dir(&ss, "/proc\0bablyshouldntexist\0")
+            assert!(get_remote_dir_obj(&ss, "/abcdef_ghijk").await.is_err());
+            assert!(get_remote_dir_obj(&ss, "hello123").await.is_err());
+            assert!(get_remote_dir_obj(&ss, "/proc\0bablyshouldntexist\0")
                 .await
                 .is_err());
-            assert!(get_remote_dir(&ss, "/proc\0/proc/stat\0")
+            assert!(get_remote_dir_obj(&ss, "/proc\0/proc/stat\0")
                 .await
                 .is_err());
         }
@@ -401,5 +468,89 @@ mod tests {
         assert!(fs::exists(test_dir).expect("Path should exist.")); 
         assert!(fs::exists(format!("{}/p1", test_dir)).expect("Path should exist.")); 
         assert!(fs::exists(format!("{}/p2", test_dir)).expect("Path should exist.")); 
+    }
+
+    #[tokio::test]
+    async fn dir_upload() {
+        let test_groups = vec![String::from("p1"), String::from("p2")];
+        let group_res = connect_to_group(&test_groups).await;
+        assert!(group_res.is_ok());
+        let (s_group, sftp_group) = group_res.unwrap();
+
+        // If this doesn't exist, create some recognisable files in ssh_utils/upload_test for testing.
+        let to_upload = "./upload_test";
+
+        let remote_loc = "/tmp/experimentah-upload-test";
+
+        // for (host, ss) in sftp_group.iter() {
+        //     let  cur_fs = ss.fs();
+        //     let pwd = cur_fs.cwd();
+        //     println!("Host {} currently at {:?}", host, pwd);
+        //     assert_eq!(pwd.to_str().unwrap(), "");
+        //     assert!(get_remote_dir_obj(&ss, &remote_loc).await.is_err());
+        // }
+
+        assert!(!dir_exists_all_remotes(&sftp_group, &remote_loc.to_string()).await);
+        assert!(upload_dir_all_remotes(&s_group, &to_upload.to_string(), &remote_loc.to_string()).await.is_ok());
+        assert!(dir_exists_all_remotes(&sftp_group, &remote_loc.to_string()).await);
+
+        for (host, ss) in sftp_group.iter() {
+            let  cur_fs = ss.fs();
+            let pwd = cur_fs.cwd();
+            println!("Host {} currently at {:?}", host, pwd);
+            assert_eq!(pwd.to_str().unwrap(), "");
+            let d = get_remote_dir_obj(&ss, &remote_loc).await;
+            assert!(d.is_ok());
+            println!("In upload dir:");
+            read_remote_dir(&d.unwrap()).await;
+        }
+
+        // Cleanup 
+        assert!(delete_dir_all_remotes(&s_group, &remote_loc.to_string()).await.is_ok());
+
+        assert!(!dir_exists_all_remotes(&sftp_group, &remote_loc.to_string()).await);
+        // for (host, ss) in sftp_group.iter() {
+        //     let  cur_fs = ss.fs();
+        //     let pwd = cur_fs.cwd();
+        //     println!("Host {} currently at {:?}", host, pwd);
+        //     assert_eq!(pwd.to_str().unwrap(), "");
+        //     assert!(get_remote_dir_obj(&ss, &remote_loc).await.is_err());
+        // }
+    }
+    // Example use case - start a group of hosts, run the sample_script.sh and collect the
+    // directory it outputs.
+    #[tokio::test]
+    async fn full_run_sample_script(){ 
+        let test_groups = vec![String::from("p1"), String::from("p2")];
+        let group_res = connect_to_group(&test_groups).await;
+        assert!(group_res.is_ok());
+        let (s_group, sftp_group) = group_res.unwrap();
+
+        let to_upload = "./test_scripts";
+        // This is a temp path for output files, specified in the sample_script.sh
+        let remote_loc = "/tmp/full-exp-test";
+        // Make sure this is executable.
+        let target_script_loc = "/tmp/full-exp-test/sample_script.sh";
+        
+        // For testing, remove the remote files if they already exist so we get updated ones
+        if (dir_exists_all_remotes(&sftp_group, &remote_loc.to_string()).await) { 
+            assert!(delete_dir_all_remotes(&s_group, &remote_loc.to_string()).await.is_ok())
+        } 
+
+        assert!(upload_dir_all_remotes(&s_group, &to_upload.to_string(), &remote_loc.to_string()).await.is_ok());
+        assert!(dir_exists_all_remotes(&sftp_group, &remote_loc.to_string()).await);
+
+        let cmd_res =
+            run_remote_command_on_group::<fn(&String) -> Vec<String>>(
+                &target_script_loc.to_string(), 
+                &s_group,
+                &None,
+                None,
+            )
+            .await;
+        assert!(cmd_res.is_ok());
+
+        assert!(retrieve_dir_all_remotes(&s_group, &remote_loc.to_string(), &"./test/sample_dir".to_string()).await.is_ok());
+        assert!(run_local_command_async(&"ls".to_string(), &Some(vec!["test/sample_dir".to_string()])).await.is_ok());
     }
 }
