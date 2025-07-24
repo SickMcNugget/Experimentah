@@ -32,31 +32,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let address = args.address;
     let timeout = Duration::from_secs(args.timeout);
 
-    let config: Config = Config::from_file(&args.config)?;
-    println!("Successfully parsed config: {:?}", &args.config);
-    config.validate()?;
-    println!("Successfully validated config: {:?}", &args.config);
+    std::env::set_current_dir(args.working_directory)?;
 
-    let experiment_config: ExperimentConfig =
-        ExperimentConfig::from_file(&args.experiment_config)?;
-    println!(
-        "Successfully parsed experiment config: {:?}",
-        &args.experiment_config
-    );
-    experiment_config.validate(&config)?;
-    println!(
-        "Successfully validated experiment_config: {:?}",
-        &args.experiment_config
-    );
+    let client = reqwest::blocking::Client::builder()
+        .timeout(timeout)
+        .build()?;
 
-    let client = reqwest::blocking::Client::new();
-    let res = client
-        .post(format!("http://{address}/run"))
-        .json(&(config, experiment_config))
-        .send()?;
-    dbg!(res);
-    let res = client.get(format!("http://{address}/status")).send()?;
-    dbg!(res);
+    if args.status {
+        let res = client.post(format!("http://{address}/status")).send()?;
+        dbg!(res);
+    } else {
+        let config = &args.config.expect("Config should have been set on CLI");
+        let experiment_config = &args
+            .experiment_config
+            .expect("Experiment config should have been set on CLI");
+
+        let config: Config = Config::from_file(config)?;
+        println!("Successfully parsed config: {:?}", config);
+        config.validate()?;
+        println!("Successfully validated config: {:?}", config);
+
+        let experiment_config: ExperimentConfig =
+            ExperimentConfig::from_file(experiment_config)?;
+        println!(
+            "Successfully parsed experiment config: {:?}",
+            experiment_config
+        );
+        experiment_config.validate(&config)?;
+        println!(
+            "Successfully validated experiment_config: {:?}",
+            experiment_config
+        );
+
+        let res = client
+            .post(format!("http://{address}/run"))
+            .json(&(config, experiment_config))
+            .send()?;
+        dbg!(res);
+    }
 
     Ok(())
 
@@ -155,6 +168,11 @@ fn default_log_file() -> PathBuf {
     path
 }
 
+fn default_working_directory() -> PathBuf {
+    let mut path = env::current_dir().unwrap();
+    path
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "Controller")]
 #[command(version = "0.0.1")]
@@ -165,11 +183,11 @@ fn default_log_file() -> PathBuf {
 struct Args {
     /// The config file storing global configuration
     #[arg(value_name = "CONFIG_FILE")]
-    config: PathBuf,
+    config: Option<PathBuf>,
 
     /// The experiment-specific configuration file
     #[arg(value_name = "EXPERIMENT_CONFIG_FILE")]
-    experiment_config: PathBuf,
+    experiment_config: Option<PathBuf>,
 
     #[arg(short, long, default_value_t = String::from("localhost:50000"))]
     address: String,
@@ -180,6 +198,12 @@ struct Args {
     /// The log file storing controller outputs
     #[arg(short, long, default_value=default_log_file().into_os_string())]
     log_file: PathBuf,
+
+    #[arg(short, long)]
+    status: bool,
+
+    #[arg(short, long, default_value=default_working_directory().into_os_string())]
+    working_directory: PathBuf,
 
     #[arg(short, long, default_value_t = 5)]
     timeout: u64,
