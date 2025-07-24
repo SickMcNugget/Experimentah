@@ -123,8 +123,8 @@ pub struct ExperimentRunner {
     pub experiments_queue: Mutex<VecDeque<ExperimentRuns>>,
 }
 
-impl ExperimentRunner {
-    pub fn new() -> Self {
+impl Default for ExperimentRunner {
+    fn default() -> Self {
         Self {
             current_experiment: Mutex::new(None),
             current_runs: 0.into(),
@@ -133,6 +133,12 @@ impl ExperimentRunner {
                 MAX_EXPERIMENTS,
             )),
         }
+    }
+}
+
+impl ExperimentRunner {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Add a new experiment to the runner
@@ -157,7 +163,7 @@ impl ExperimentRunner {
             };
 
             info!(
-                "{} experiments received, running for {} repeats",
+                "{} experiments received, performing {} runs.",
                 experiments.len(),
                 runs
             );
@@ -169,7 +175,7 @@ impl ExperimentRunner {
                 for experiment in experiments.iter() {
                     {
                         info!(
-                            "Running experiment {}. (repeat {}/{})",
+                            "Running experiment \"{}\" (repeat {}/{})...",
                             &experiment.name, i, runs
                         );
                         let mut current_experiment =
@@ -181,11 +187,16 @@ impl ExperimentRunner {
                 }
             }
             info!("Finished experiments");
+
+            self.current_runs.store(0, Ordering::Relaxed);
+            self.current_run.store(0, Ordering::Relaxed);
+            *self.current_experiment.lock().await = None;
         }
     }
 
     async fn run_experiment(&self, experiment: &Experiment) {
-        tokio::time::sleep(Duration::from_millis(2000)).await;
+        todo!("Running an experiment needs to perform setup, execution, and teardown steps.");
+        // tokio::time::sleep(Duration::from_millis(2000)).await;
     }
 
     // An experiment is constructed from the experiment configuration.
