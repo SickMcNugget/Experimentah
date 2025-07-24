@@ -160,7 +160,7 @@ pub struct Config {
 
 impl FromStr for Config {
     type Err = ParseError;
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+    fn from_str(s: &str) -> Result<Self> {
         Self::parse_toml(s)
     }
 }
@@ -349,6 +349,14 @@ pub struct ExperimentConfig {
     pub runners: Vec<String>,
 }
 
+impl FromStr for ExperimentConfig {
+    type Err = ParseError;
+
+    fn from_str(s: &str) -> Result<Self> {
+        Self::parse_toml(s)
+    }
+}
+
 impl ExperimentConfig {
     pub fn from_file(file: &Path) -> Result<Self> {
         let experiment_config_str =
@@ -373,10 +381,6 @@ impl ExperimentConfig {
         })?;
 
         Ok(experiment_config)
-    }
-
-    pub fn from_str(string: &str) -> Result<Self> {
-        Self::parse_toml(string)
     }
 
     fn default_runs() -> u16 {
@@ -423,7 +427,7 @@ impl ExperimentConfig {
         )?;
 
         for (i, variation) in self.variations.iter().enumerate() {
-            let name = variation.name.as_ref().unwrap_or_else(|| &self.name);
+            let name = variation.name.as_ref().unwrap_or(&self.name);
             variation.validate(config).map_err(|e| {
                 ParseError::from((
                     format!(
