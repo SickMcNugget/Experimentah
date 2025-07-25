@@ -253,8 +253,6 @@ pub async fn retrieve_dir_all_remotes(
     remote_path: &String, // e.g. (Remote) /srv/data
     local_path: &String, // e.g. (Local) ~/results 
 ) -> Result<(), AnyError> {
-    // let scp_cmd = String::from("scp");
-    // let args = vec!["-r".to_string()];
     let ex = fs::exists(local_path)?;
     if !ex { 
         match fs::create_dir_all(local_path) { 
@@ -262,16 +260,6 @@ pub async fn retrieve_dir_all_remotes(
             Err(e) => eprintln!("Failed to create dir {} (may already exist).", local_path),
         } 
     } 
-    // run_local_command_on_group(
-    //     &scp_cmd,
-    //     &s,
-    //     &Some(args),
-    //     Some(move |host: &String| -> Vec<String> {
-    //         let full_src = format!("{}:{}", host.clone(), remote_path.clone());
-    //         let full_dst = format!("{}/{}", local_path.clone(),host.clone(),);
-    //         vec![full_src.clone(), full_dst.clone()]
-    //     }),
-    // )
     local_scp_over_group(s,
         move |host: &String| -> Vec<String> {
             let full_remote = format!("{}:{}", host.clone(), remote_path.clone());
@@ -312,7 +300,7 @@ pub async fn upload_dir_all_remotes(
     remote_path: &String, // e.g. (Remote) /srv/data
 ) -> Result<(), AnyError> {
     // Check the directory to upload exists
-    let ex = fs::exists(local_path)?;
+    fs::exists(local_path)?;
     local_scp_over_group(s,
         move |host: &String| -> Vec<String> {
             let full_remote = format!("{}:{}", host.clone(), remote_path.clone());
@@ -344,12 +332,12 @@ mod tests {
 
     // Implicitly tested in the run_* tests
     // #[tokio::test]
-    // async fn connect_to_known() {
-    //     // These should be known in your SSH config.
-    //     let test_groups = vec![String::from("p1"), String::from("p2")];
-    //     let group = connect_to_group(&test_groups).await;
-    //     assert!(group.is_ok());
-    // }
+
+    // Change the vector to contain your SSH targets for testing.
+    async fn create_test_group() -> Result<(SessionMap,SFTPMap),AnyError> { 
+        let test_groups = vec![String::from("p1"), String::from("p2")];
+        connect_to_group(&test_groups).await
+    } 
 
     #[tokio::test]
     async fn connect_to_none() {
@@ -385,8 +373,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_known_command() {
-        let test_groups = vec![String::from("p1"), String::from("p2")];
-        let group_res = connect_to_group(&test_groups).await;
+        let group_res = create_test_group().await;
         assert!(group_res.is_ok());
         let (group, sftp_group) = group_res.unwrap();
 
@@ -403,8 +390,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_unknown_command() {
-        let test_groups = vec![String::from("p1"), String::from("p2")];
-        let group_res = connect_to_group(&test_groups).await;
+        let group_res = create_test_group().await;
         assert!(group_res.is_ok());
         let (group, sftp_group) = group_res.unwrap();
 
@@ -421,8 +407,7 @@ mod tests {
 
     #[tokio::test]
     async fn dir_retrieval() {
-        let test_groups = vec![String::from("p1"), String::from("p2")];
-        let group_res = connect_to_group(&test_groups).await;
+        let group_res = create_test_group().await;
         assert!(group_res.is_ok());
         let (s_group, sftp_group) = group_res.unwrap();
 
@@ -472,8 +457,7 @@ mod tests {
 
     #[tokio::test]
     async fn dir_upload() {
-        let test_groups = vec![String::from("p1"), String::from("p2")];
-        let group_res = connect_to_group(&test_groups).await;
+        let group_res = create_test_group().await;
         assert!(group_res.is_ok());
         let (s_group, sftp_group) = group_res.unwrap();
 
@@ -521,8 +505,7 @@ mod tests {
     // directory it outputs.
     #[tokio::test]
     async fn full_run_sample_script(){ 
-        let test_groups = vec![String::from("p1"), String::from("p2")];
-        let group_res = connect_to_group(&test_groups).await;
+        let group_res = create_test_group().await;
         assert!(group_res.is_ok());
         let (s_group, sftp_group) = group_res.unwrap();
 
