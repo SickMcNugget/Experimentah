@@ -1,0 +1,12 @@
+[package]
+name = "ssh-utils"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+futures = "0.3.31"
+futures-core = "0.3.31"
+futures-util = "0.3.31"
+openssh = "0.11.5"
+openssh-sftp-client = { version = "0.15.2", features = ["openssh"] }
+tokio.workspace = true

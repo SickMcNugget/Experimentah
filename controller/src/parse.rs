@@ -1,6 +1,6 @@
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::{fs, io};
@@ -286,7 +286,7 @@ impl RunnerConfig {
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
 pub struct ExporterConfig {
     pub name: String,
-    pub host: String,
+    pub hosts: Vec<String>,
     pub command: String,
     #[serde(default)]
     pub setup: Vec<String>,
@@ -313,12 +313,14 @@ impl ExporterConfig {
         }
 
         // Ensure the hosts exist
-        hosts.iter().find(|host| host.name == self.host).ok_or(
-            ParseError::ValidationError(format!(
-                "Invalid host definition for exporter {}: {}",
-                self.name, self.host
-            )),
-        )?;
+        for host in self.hosts.iter() {
+            hosts.iter().find(|c_host| c_host.name == *host).ok_or(
+                ParseError::ValidationError(format!(
+                    "Invalid host definition for exporter {}: {}",
+                    self.name, host
+                )),
+            )?;
+        }
 
         Ok(())
     }
@@ -394,7 +396,7 @@ impl ExperimentConfig {
     ) -> Result<()> {
         if expected.is_some_and(|a| a != args.len()) {
             Err(ParseError::ValidationError(format!(
-                "Error in experiment {}: Expected {} arguments, got {}",
+                "Error in experiment '{}': Expected {} arguments, got {}",
                 name,
                 expected.unwrap(),
                 args.len()
@@ -404,9 +406,15 @@ impl ExperimentConfig {
     }
 
     pub fn validate(&self, config: &Config) -> Result<()> {
+        if self.execute.clone().into_os_string().is_empty() {
+            Err(ParseError::ValidationError(format!(
+                "The 'execute' field in an experiment config cannot be empty"
+            )))?;
+        }
+
         check_file_exists(&self.execute).map_err(|e| {
             ParseError::from((
-                format!("Missing files for experiment {}", self.name),
+                format!("Missing files for experiment '{}'", self.name),
                 e,
             ))
         })?;
@@ -414,24 +422,24 @@ impl ExperimentConfig {
         for setup in self.setup.iter() {
             setup.validate(config).map_err(|e| {
                 ParseError::from((
-                    format!("Invalid setup for experiment {}", self.name),
+                    format!("Invalid setup for experiment '{}'", self.name),
                     e,
                 ))
             })?;
         }
 
-        ExperimentConfig::validate_arguments(
-            &self.name,
-            self.expected_arguments,
-            &self.arguments,
-        )?;
+        // ExperimentConfig::validate_arguments(
+        //     &self.name,
+        //     self.expected_arguments,
+        //     &self.arguments,
+        // )?;
 
         for (i, variation) in self.variations.iter().enumerate() {
             let name = variation.name.as_ref().unwrap_or(&self.name);
             variation.validate(config).map_err(|e| {
                 ParseError::from((
                     format!(
-                        "Invalid variation (index {i}) for experiment {}",
+                        "Invalid variation (index {i}) for experiment '{}'",
                         self.name
                     ),
                     e,
@@ -447,7 +455,7 @@ impl ExperimentConfig {
 
             if self.runners.is_empty() && variation.runners.is_empty() {
                 return Err(ParseError::ValidationError(format!(
-                    "No runners have been defined for experiment {}",
+                    "No runners have been defined for experiment '{}'",
                     self.name
                 )));
             }
@@ -456,7 +464,10 @@ impl ExperimentConfig {
         for teardown in self.teardown.iter() {
             teardown.validate(config).map_err(|e| {
                 ParseError::from((
-                    format!("Invalid teardown for experiment {}", self.name),
+                    format!(
+                        "Invalid teardown for experiment '{}': {:?}",
+                        self.name, teardown
+                    ),
                     e,
                 ))
             })?;
@@ -469,8 +480,8 @@ impl ExperimentConfig {
                 .any(|c_exporter| c_exporter.name == *exporter)
             {
                 Err(ParseError::ValidationError(format!(
-                    "Invalid exporter for experiment {}",
-                    self.name
+                    "Invalid exporter for experiment '{}': {}",
+                    self.name, exporter
                 )))?;
             }
         }
@@ -692,19 +703,16 @@ fn map_exporters(config: &Config, exporters: &[String]) -> Vec<Exporter> {
     for c_exporter in config.exporters.iter() {
         for exporter in exporters.iter() {
             if c_exporter.name == *exporter {
-                let host = config
-                    .hosts
-                    .iter()
-                    .find(|host| host.name == c_exporter.host)
-                    .expect(
-                        "We should not fail to cross-reference at this point.",
-                    );
-                mapped_exporters.push(Exporter::new(
-                    c_exporter.name.to_string(),
-                    host.address.to_string(),
-                    c_exporter.command.to_string(),
-                    c_exporter.setup.clone(),
-                ));
+                for host in c_exporter.hosts.iter() {
+                    let c_host = config.hosts.iter().find(|c_host| c_host.name == *host)
+                    .expect("We should not fail to cross-reference at this point.");
+                    mapped_exporters.push(Exporter::new(
+                        c_exporter.name.to_string(),
+                        c_host.address.to_string(),
+                        c_exporter.command.to_string(),
+                        c_exporter.setup.clone(),
+                    ));
+                }
             }
         }
     }
@@ -802,7 +810,7 @@ fn check_file_exists(file: &Path) -> io::Result<()> {
         true => Ok(()),
         false => Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
-            format!("File {} does not exist", file.to_string_lossy()),
+            format!("File '{}' does not exist", file.to_string_lossy()),
         )),
     }
 }
@@ -859,7 +867,7 @@ mod tests {
             exporters: vec![
                 ExporterConfig {
                     name: "test-exporter".to_string(),
-                    host: "localhost".to_owned(),
+                    hosts: vec!["localhost".to_owned()],
                     command: "sar -o collection.bin".to_string(),
                     setup: vec![
                         "dnf install -y sysstat".into(),
@@ -868,7 +876,7 @@ mod tests {
                 },
                 ExporterConfig {
                     name: "another-test-exporter".to_string(),
-                    host: "localhost".into(),
+                    hosts: vec!["localhost".into()],
                     command: "my_collector".into(),
                     setup: vec![],
                 },

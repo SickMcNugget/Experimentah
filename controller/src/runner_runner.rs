@@ -121,6 +121,10 @@ impl Runner {
         command
     }
 
+    // /// Caller should check that nothing else is currently running.
+    // pub fn run_next_experiment(&self) -> Runner {
+    //     if *self.waiting_experiments.lock().unwrap() < 1 {}
+    // }
     pub fn add_experiment(
         &self,
         sender: &Sender<Experiment>,
@@ -130,6 +134,10 @@ impl Runner {
             .send(experiment)
             .expect("Unable to send experiment to runner queue");
         *self.waiting_experiments.lock().unwrap() += 1;
+        // When adding an experiment, also run it if there's no other experiments running.
+        if !*self.busy.lock().unwrap() {
+            // self.run_next_experiment();
+        }
     }
 
     pub fn run_commands(&self, commands: &Vec<String>) -> Vec<String> {

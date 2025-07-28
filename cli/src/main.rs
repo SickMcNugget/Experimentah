@@ -10,24 +10,39 @@
 //  b. Tries to upload collected results (if the error was with repo node)
 //  c. Dies
 
+use core::fmt;
 use std::env;
+use std::error::Error;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use clap::Parser;
+use clap::{Args, Parser};
 
 use controller::parse::{Config, ExperimentConfig};
 use controller::run::ExperimentRunner;
 
-use reqwest::{Client, StatusCode};
+use reqwest::blocking::Client;
+use reqwest::StatusCode;
 
 use std::time::Duration;
 
+use cli::CliError;
+
 const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(5000);
+
+fn arg_or_error<'a, T>(
+    arg: &'a Option<T>,
+    ident: &'static str,
+) -> Result<&'a T, CliError> {
+    match arg.as_ref() {
+        None => Err(CliError::from(format!("{ident} was not set"))),
+        Some(val) => Ok(val),
+    }
+}
 
 // #[tokio::main]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args = Args::parse();
+    let args = AppArgs::parse();
 
     let address = args.address;
     let timeout = Duration::from_secs(args.timeout);
@@ -38,85 +53,160 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .timeout(timeout)
         .build()?;
 
-    if args.status {
-        let res = client.post(format!("http://{address}/status")).send()?;
-        dbg!(res);
-    } else {
-        let config = &args.config.expect("Config should have been set on CLI");
-        let experiment_config = &args
-            .experiment_config
-            .expect("Experiment config should have been set on CLI");
-
-        let config: Config = Config::from_file(config)?;
-        println!("Successfully parsed config: {:?}", config);
-        config.validate()?;
-        println!("Successfully validated config: {:?}", config);
-
-        let experiment_config: ExperimentConfig =
-            ExperimentConfig::from_file(experiment_config)?;
-        println!(
-            "Successfully parsed experiment config: {:?}",
-            experiment_config
-        );
-        experiment_config.validate(&config)?;
-        println!(
-            "Successfully validated experiment_config: {:?}",
-            experiment_config
-        );
-
-        let res = client
-            .post(format!("http://{address}/run"))
-            .json(&(config, experiment_config))
-            .send()?;
-        dbg!(res);
+    // Early exit if we just want a status check
+    if args.pathway.status {
+        check_status(&client, &address)?;
+        return Ok(());
+    } else if args.pathway.validate {
+        validate_configs(&args.config, &args.experiment_config);
+        return Ok(());
     }
 
+    let config = arg_or_error(&args.config, "CONFIG_FILE")?;
+    let experiment_config =
+        arg_or_error(&args.experiment_config, "EXPERIMENT_CONFIG_FILE")?;
+
+    let config: Config = Config::from_file(config)?;
+    println!("Successfully parsed config: {:?}", config);
+    config.validate()?;
+    println!("Successfully validated config: {:?}", config);
+
+    let experiment_config: ExperimentConfig =
+        ExperimentConfig::from_file(experiment_config)?;
+    println!(
+        "Successfully parsed experiment config: {:?}",
+        experiment_config
+    );
+    experiment_config.validate(&config)?;
+    println!(
+        "Successfully validated experiment_config: {:?}",
+        experiment_config
+    );
+
+    let res = client
+        .post(format!("http://{address}/run"))
+        .json(&(config, experiment_config))
+        .send()?;
+    dbg!(res);
     Ok(())
-
-    // println!("Logging to file: {:?}", args.log_file);
-
-    // let client = Client::builder()
-    //     .timeout(timeout)
-    //     .build()
-    //     .expect("Somehow an invalid client was built");
-
-    // let mut er = ExperimentRunner::new(
-    //     config.as_ref(),
-    //     experiment_config.as_ref(),
-    //     client.clone(),
-    // );
-
-    // I think that I want the controller to ensure that runners are available on the hosts they're
-    // meant to be on.
-    // I want the runner to ensure that exporters are working as expected, though, meaning that
-    // an endpoint needs to be added to the runner which allows an exporter to be registered (and
-    // subsequently monitored) by that runner. Exporters will be programs that are run in the
-    // background during the execution of a run. We'll use and advisory lock to make sure that
-    // multiple instances of the exporter program are not created, and that they're properly killed
-    // at the end of a run. I think the expectation at this point is that an exporter should be a
-    // long-running process which outputs it's data to a file. It's the responsibility of the
-    // exporter itself to include timestamp information and do all the heavy lifting regarding
-    // metrics collection.
-    // Think tools like sar, and raritan (my bespoke power usage script).
-
-    // TODO(joren): In the future, it may be better to only prepare runners for the experiment
-    // that's about to be run. For now, I'd like to do everything at the beginning, though.
-    // println!("Ensuring all runners are up and reachable");
-    // if let Err(e) = er.check_runners().await {
-    //     panic!("{e}");
-    // }
-    //
-    // tokio::spawn(async move { heartbeat_thread(client, config).await });
-    //
-    // let runs = &experiment_config.runs;
-    // println!("= Running Experiment {}=", runs);
-    //
-    // for _ in 0..*runs {
-    //     todo!();
-    // }
-    //
-    // println!("\n= Successful Experiments =");
 }
+
+fn check_status(client: &Client, address: &str) -> cli::Result<()> {
+    let response = client
+        .post(format!("http://{address}/status"))
+        .send()
+        .map_err(|e| CliError::from(("Error checking status", e)))?;
+
+    println!("{response:?}");
+    Ok(())
+}
+
+fn validate_configs(
+    config: &Option<PathBuf>,
+    experiment_config: &Option<PathBuf>,
+) {
+    if config.is_none() && experiment_config.is_some() {
+        eprintln!(
+            "Unable to validate an experiment config without a normal config"
+        );
+        return;
+    }
+
+    if config.is_none() && experiment_config.is_none() {
+        eprintln!("No configs provided for validation");
+        return;
+    }
+
+    // We've guaranteed a config is present.
+    let config = config.as_ref().unwrap();
+    match Config::from_file(&config) {
+        Ok(config) => match config.validate() {
+            Ok(_) => {
+                println!("Config is valid");
+                match experiment_config {
+                    Some(experiment_config) => {
+                        match ExperimentConfig::from_file(experiment_config) {
+                            Ok(experiment_config) => {
+                                match experiment_config.validate(&config) {
+                                    Ok(_) => {
+                                        println!("Experiment config is valid");
+                                    }
+                                    Err(e) => {
+                                        eprintln!(
+                                            "Invalid experiment config: {}",
+                                            e
+                                        );
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("Invalid experiment config: {}", e)
+                            }
+                        }
+                    }
+                    None => {
+                        println!(
+                            "Skipping Experiment config as it was not provided"
+                        )
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("Invalid config: {e}")
+            }
+        },
+        Err(e) => {
+            eprintln!("Invalid config: {e}")
+        }
+    };
+}
+
+// fn check
+
+// println!("Logging to file: {:?}", args.log_file);
+
+// let client = Client::builder()
+//     .timeout(timeout)
+//     .build()
+//     .expect("Somehow an invalid client was built");
+
+// let mut er = ExperimentRunner::new(
+//     config.as_ref(),
+//     experiment_config.as_ref(),
+//     client.clone(),
+// );
+
+// I think that I want the controller to ensure that runners are available on the hosts they're
+// meant to be on.
+// I want the runner to ensure that exporters are working as expected, though, meaning that
+// an endpoint needs to be added to the runner which allows an exporter to be registered (and
+// subsequently monitored) by that runner. Exporters will be programs that are run in the
+// background during the execution of a run. We'll use and advisory lock to make sure that
+// multiple instances of the exporter program are not created, and that they're properly killed
+// at the end of a run. I think the expectation at this point is that an exporter should be a
+// long-running process which outputs it's data to a file. It's the responsibility of the
+// exporter itself to include timestamp information and do all the heavy lifting regarding
+// metrics collection.
+// Think tools like sar, and raritan (my bespoke power usage script).
+
+// TODO(joren): In the future, it may be better to only prepare runners for the experiment
+// that's about to be run. For now, I'd like to do everything at the beginning, though.
+// println!("Ensuring all runners are up and reachable");
+// if let Err(e) = er.check_runners().await {
+//     panic!("{e}");
+// }
+//
+// tokio::spawn(async move { heartbeat_thread(client, config).await });
+//
+// let runs = &experiment_config.runs;
+// println!("= Running Experiment {}=", runs);
+//
+// for _ in 0..*runs {
+//     todo!();
+// }
+//
+// println!("\n= Successful Experiments =");
+// }
 
 // Runs periodically and determines service connectivity
 // async fn heartbeat_thread(client: Client, config: Arc<Config>) {
@@ -180,31 +270,37 @@ fn default_working_directory() -> PathBuf {
     about = "Allows a user to run experiments using defined configs/experiment configs"
 )]
 #[command(long_about = None)]
-struct Args {
+struct AppArgs {
     /// The config file storing global configuration
-    #[arg(value_name = "CONFIG_FILE")]
+    #[arg(short, long)]
     config: Option<PathBuf>,
 
     /// The experiment-specific configuration file
-    #[arg(value_name = "EXPERIMENT_CONFIG_FILE")]
+    #[arg(short, long)]
     experiment_config: Option<PathBuf>,
 
     #[arg(short, long, default_value_t = String::from("localhost:50000"))]
     address: String,
-    /// Perform all initial checks without running the experiment
-    #[arg(short, long)]
-    dry_run: bool,
 
     /// The log file storing controller outputs
     #[arg(short, long, default_value=default_log_file().into_os_string())]
     log_file: PathBuf,
-
-    #[arg(short, long)]
-    status: bool,
 
     #[arg(short, long, default_value=default_working_directory().into_os_string())]
     working_directory: PathBuf,
 
     #[arg(short, long, default_value_t = 5)]
     timeout: u64,
+
+    #[command(flatten)]
+    pathway: ExecutionPathway,
+}
+
+#[derive(Args, Debug)]
+#[group(required = false, multiple = false)]
+struct ExecutionPathway {
+    #[arg(short, long)]
+    validate: bool,
+    #[arg(short, long)]
+    status: bool,
 }

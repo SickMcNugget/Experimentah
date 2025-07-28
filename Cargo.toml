@@ -1,8 +1,9 @@
 [workspace]
-members = [ "cli","controller", "runner"]
+members = ["controller", "ssh_utils", "cli"]
 resolver = "2"
 
 [workspace.package]
+name = "experimentah"
 version = "0.1.0"
 edition = "2021"
 
@@ -10,10 +11,6 @@ edition = "2021"
 toml = "0.8.16"
 serde_json = "1.0"
 serde = { version = "1.0.204", features = ["derive"] }
-# clap = { version = "4.5.11", features = ["derive", "string"] }
+clap = { version = "4.5.11", features = ["derive", "string"] }
 reqwest = { version = "0.12.5", features = ["json"] }
 tokio = { version = "1", features = ["full"] }
-
-# [[bin]]
-# name = "controller"
-# path = "controller/src/main.rs"
