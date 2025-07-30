@@ -67,21 +67,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         arg_or_error(&args.experiment_config, "EXPERIMENT_CONFIG_FILE")?;
 
     let config: Config = Config::from_file(config)?;
-    println!("Successfully parsed config: {:?}", config);
+    println!("Successfully parsed config");
     config.validate()?;
-    println!("Successfully validated config: {:?}", config);
+    println!("Successfully validated config");
 
     let experiment_config: ExperimentConfig =
         ExperimentConfig::from_file(experiment_config)?;
-    println!(
-        "Successfully parsed experiment config: {:?}",
-        experiment_config
-    );
+    println!("Successfully parsed experiment config");
     experiment_config.validate(&config)?;
-    println!(
-        "Successfully validated experiment_config: {:?}",
-        experiment_config
-    );
+    println!("Successfully validated experiment_config");
 
     let res = client
         .post(format!("http://{address}/run"))
@@ -93,11 +87,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 fn check_status(client: &Client, address: &str) -> cli::Result<()> {
     let response = client
-        .post(format!("http://{address}/status"))
+        .get(format!("http://{address}/status"))
         .send()
         .map_err(|e| CliError::from(("Error checking status", e)))?;
 
-    println!("{response:?}");
+    // dbg!(&response);
+
+    // let json: String = response.json()?;
+    let text: String = response.text()?;
+    println!("{}", text);
     Ok(())
 }
 

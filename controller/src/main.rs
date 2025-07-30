@@ -137,6 +137,15 @@ async fn run(
     Ok(())
 }
 
+// async fn status(State(run_state): State<SharedRunState>) -> Json<String> {
+//     let runner = &run_state.runner;
+//     let current_experiment = runner.current_experiment.lock().await;
+//     let current_run = runner.current_run.load(Ordering::Relaxed);
+//     let current_runs = runner.current_runs.load(Ordering::Relaxed);
+//
+//     Json(format!("Current Experiment: {current_experiment:?}, Current run: {current_run:?}/{current_runs:?}"))
+// }
+
 async fn status(State(run_state): State<SharedRunState>) -> String {
     let runner = &run_state.runner;
     let current_experiment = runner.current_experiment.lock().await;

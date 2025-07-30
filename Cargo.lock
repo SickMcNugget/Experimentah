@@ -290,7 +290,12 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "env_logger",
+ "futures",
+ "futures-core",
+ "futures-util",
  "log",
+ "openssh",
+ "openssh-sftp-client",
  "serde",
  "serde_json",
  "shlex",

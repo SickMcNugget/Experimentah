@@ -45,6 +45,12 @@ impl From<(&str, reqwest::Error)> for CliError {
     }
 }
 
+impl From<reqwest::Error> for CliError {
+    fn from(value: reqwest::Error) -> Self {
+        CliError::ReqwestError("".into(), value)
+    }
+}
+
 impl From<String> for CliError {
     fn from(value: String) -> Self {
         CliError::GenericError(value)

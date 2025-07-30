@@ -1,6 +1,8 @@
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
+use log::error;
 use serde::{Deserialize, Deserializer, Serialize};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::{fs, io};
@@ -37,6 +39,7 @@ impl ParseError {
 
 impl IntoResponse for ParseError {
     fn into_response(self) -> axum::response::Response {
+        error!("{}", self);
         let body = self.to_string();
         let code = self.status_code();
         (code, body).into_response()
@@ -412,12 +415,14 @@ impl ExperimentConfig {
             )))?;
         }
 
-        check_file_exists(&self.execute).map_err(|e| {
-            ParseError::from((
-                format!("Missing files for experiment '{}'", self.name),
-                e,
-            ))
-        })?;
+        // TODO(joren): Return this check
+        // check_file_exists(&self.execute).map_err(|e| {
+        //     ParseError::from((
+        //         format!("Missing files for experiment '{}'", self.name),
+        //         e,
+        //     ))
+        // })?;
+
 
         for setup in self.setup.iter() {
             setup.validate(config).map_err(|e| {
@@ -485,7 +490,6 @@ impl ExperimentConfig {
                 )))?;
             }
         }
-
         Ok(())
     }
 }
@@ -574,9 +578,10 @@ impl RemoteExecutionConfig {
                 )))?;
             }
         }
-        check_files_exist(&self.scripts).map_err(|e| {
-            ParseError::from(("Missing files for setup/teardown", e))
-        })?;
+        // TODO(joren): Return this check
+        // check_files_exist(&self.scripts).map_err(|e| {
+        //     ParseError::from(("Missing files for setup/teardown", e))
+        // })?;
         Ok(())
     }
 }
@@ -594,6 +599,20 @@ pub struct Experiment {
     pub arguments: Vec<String>,
     pub expected_arguments: Option<usize>,
     pub exporters: Vec<Exporter>,
+}
+
+impl Experiment {
+    pub fn hosts(&self) -> Vec<String> {
+        let mut unique_hosts = HashSet::new();
+        for runner in self.runners.iter() {
+            unique_hosts.insert(runner.address.clone());
+        }
+        for exporter in self.exporters.iter() {
+            unique_hosts.insert(exporter.address.clone());
+        }
+
+        unique_hosts.into_iter().collect::<Vec<String>>()
+    }
 }
 
 #[derive(Debug, Hash, Eq, PartialEq)]

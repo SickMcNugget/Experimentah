@@ -7,13 +7,19 @@ const MAX_EXPERIMENTS: usize = 32;
 const RUN_POLL_SLEEP: Duration = Duration::from_millis(250);
 
 use std::collections::VecDeque;
+use std::path::PathBuf;
 // use reqwest::Client;
-use log::info;
+use log::{error, info};
 use std::process::{Child, Command};
 use std::sync::atomic::{AtomicU16, Ordering};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{collections::HashSet, path::Path};
 use tokio::sync::Mutex;
+
+use crate::ssh::{
+    self, close_group_sessions, connect_to_group, run_remote_command_on_group,
+    Sessions,
+};
 
 type Result<T> = std::result::Result<T, RuntimeError>;
 
@@ -162,8 +168,19 @@ impl ExperimentRunner {
                 }
             };
 
+            // We create the timestamp once for each full experiment
+            // TODO(joren): Think about what you want to do with errors.
+            // It might be worth having an endpoint that can retrieve errors.
+            let ts = match SystemTime::now().duration_since(UNIX_EPOCH) {
+                Ok(ts) => ts.as_millis(),
+                Err(e) => {
+                    error!("The current time is before the unix epoch.");
+                    continue;
+                }
+            };
+
             info!(
-                "{} experiments received, performing {} runs.",
+                "Experiment with {} variations received ({} repeats).",
                 experiments.len(),
                 runs
             );
@@ -183,7 +200,130 @@ impl ExperimentRunner {
                         *current_experiment = Some(experiment.name.clone());
                     }
 
-                    self.run_experiment(experiment).await;
+                    // TODO(joren): handle the result from connecting
+                    let sessions = ssh::connect_to_hosts(&experiment.hosts())
+                        .await
+                        .unwrap();
+
+                    dbg!(&sessions.keys().collect::<Vec<&String>>());
+
+                    let variation_directory: PathBuf =
+                        PathBuf::from(format!("/srv/experimentah/{ts}/{i}"));
+                    let experiment_directory =
+                        variation_directory.parent().unwrap();
+
+                    // Move the required resources onto the host
+                    let setup_sessions: Sessions = sessions
+                        .iter()
+                        .filter(|(key, _)| {
+                            experiment.setup.iter().any(|remote_execution| {
+                                remote_execution
+                                    .runners
+                                    .iter()
+                                    .any(|runner| &runner.address == *key)
+                            })
+                        })
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect();
+
+                    println!("Setup Sessions: {}", setup_sessions.len());
+
+                    ssh::run_command(
+                        &sessions,
+                        &[
+                            "mkdir".into(),
+                            "-p".into(),
+                            variation_directory.to_string_lossy().to_string(),
+                        ],
+                    )
+                    .await
+                    .unwrap();
+
+                    for setup in experiment.setup.iter() {
+                        let setup_sessions: Sessions = sessions
+                            .iter()
+                            .filter(|(key, _)| {
+                                setup
+                                    .runners
+                                    .iter()
+                                    .any(|runner| &runner.address == *key)
+                            })
+                            .map(|(key, value)| (key.clone(), value.clone()))
+                            .collect();
+
+                        for script in setup.scripts.iter() {
+                            // TODO(joren): handle the canonicalisation error
+                            let script_path = script.canonicalize().unwrap();
+                            //TODO(joren): Handle error case
+                            ssh::upload(
+                                &setup_sessions,
+                                &script_path,
+                                experiment_directory,
+                            )
+                            .await
+                            .unwrap();
+                            // TODO(joren): Handle error case
+                            let remote_script = experiment_directory
+                                .join(script.file_name().unwrap());
+                            ssh::run_script(&setup_sessions, &remote_script)
+                                .await
+                                .unwrap();
+                        }
+                    }
+
+                    for teardown in experiment.teardown.iter() {
+                        let teardown_sessions: Sessions = sessions
+                            .iter()
+                            .filter(|(key, _)| {
+                                teardown
+                                    .runners
+                                    .iter()
+                                    .any(|runner| &runner.address == *key)
+                            })
+                            .map(|(key, value)| (key.clone(), value.clone()))
+                            .collect();
+
+                        println!(
+                            "teardown sessions: {}",
+                            teardown_sessions.len()
+                        );
+
+                        for script in teardown.scripts.iter() {
+                            // TODO(joren): handle the canonicalisation error
+                            let script_path = script.canonicalize().unwrap();
+                            //TODO(joren): Handle error case
+                            ssh::upload(
+                                &teardown_sessions,
+                                &script_path,
+                                experiment_directory,
+                            )
+                            .await
+                            .unwrap();
+                            // TODO(joren): Handle error case
+                            let remote_script = experiment_directory
+                                .join(script.file_name().unwrap());
+                            ssh::run_script(&teardown_sessions, &remote_script)
+                                .await
+                                .unwrap();
+                        }
+                    }
+
+                    // let command_args = vec!["cd".to_string(), ".ssh".into()];
+                    // ssh::run_command_on_sessions(&sessions, &command_args)
+                    //     .await
+                    //     .unwrap();
+                    //
+                    // let command_args = vec!["ls".to_string(), "-al".into()];
+                    // // TODO(joren): handle the result from running commands
+                    // ssh::run_command_on_sessions(&sessions, &command_args)
+                    //     .await
+                    //     .unwrap();
+
+                    // let connections =
+                    //     Experiment::connect_to_hosts(experiment.hosts())
+                    // self.run_experiment();
+
+                    // self.run_experiment(experiment).await;
                 }
             }
             info!("Finished experiments");
@@ -195,6 +335,24 @@ impl ExperimentRunner {
     }
 
     async fn run_experiment(&self, experiment: &Experiment) {
+        // todo!("Running an experiment needs to perform setup, execution, and teardown steps.");
+        match connect_to_group(&experiment.hosts()).await {
+            Ok((group, sftp)) => {
+                info!("Successfully connected to group, {group:?}, {sftp:?}");
+
+                run_remote_command_on_group::<fn(&String) -> Vec<String>>(
+                    &"echo".to_string(),
+                    &group,
+                    &Some(vec!["hello".to_string()]),
+                    None,
+                )
+                .await;
+
+                close_group_sessions(group).await;
+            }
+            Err(e) => error!("Failed to connect to group, {e}"),
+        }
+
         todo!("Running an experiment needs to perform setup, execution, and teardown steps.");
         // tokio::time::sleep(Duration::from_millis(2000)).await;
     }
