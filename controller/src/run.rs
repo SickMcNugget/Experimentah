@@ -1,7 +1,8 @@
 use crate::parse::{
     generate_experiments, Config, Experiment, ExperimentConfig, ExperimentRuns,
-    RemoteExecution, Runner,
+    Exporter, Host, RemoteExecution,
 };
+use crate::REMOTE_DIR;
 
 const MAX_EXPERIMENTS: usize = 32;
 const RUN_POLL_SLEEP: Duration = Duration::from_millis(250);
@@ -205,39 +206,16 @@ impl ExperimentRunner {
                         .await
                         .unwrap();
 
-                    dbg!(&sessions.keys().collect::<Vec<&String>>());
-
-                    let variation_directory: PathBuf =
-                        PathBuf::from(format!("/srv/experimentah/{ts}/{i}"));
+                    let variation_directory =
+                        Self::make_variation_directory(&sessions, ts, i).await;
                     let experiment_directory =
                         variation_directory.parent().unwrap();
 
-                    // Move the required resources onto the host
-                    let setup_sessions: Sessions = sessions
-                        .iter()
-                        .filter(|(key, _)| {
-                            experiment.setup.iter().any(|remote_execution| {
-                                remote_execution
-                                    .runners
-                                    .iter()
-                                    .any(|runner| &runner.address == *key)
-                            })
-                        })
-                        .map(|(k, v)| (k.clone(), v.clone()))
-                        .collect();
-
-                    println!("Setup Sessions: {}", setup_sessions.len());
-
-                    ssh::run_command(
+                    Self::start_exporters(
                         &sessions,
-                        &[
-                            "mkdir".into(),
-                            "-p".into(),
-                            variation_directory.to_string_lossy().to_string(),
-                        ],
-                    )
-                    .await
-                    .unwrap();
+                        &experiment.exporters,
+                        experiment_directory,
+                    );
 
                     Self::run_remote_execution(
                         &sessions,
@@ -245,6 +223,7 @@ impl ExperimentRunner {
                         experiment_directory,
                     )
                     .await;
+
                     // run_variation(&sessions, &experiment);
                     Self::run_remote_execution(
                         &sessions,
@@ -348,14 +327,68 @@ impl ExperimentRunner {
         }
     }
 
-    fn filter_sessions(sessions: &Sessions, runners: &Vec<Runner>) -> Sessions {
+    async fn make_variation_directory(
+        sessions: &Sessions,
+        timestamp: u128,
+        run: u16,
+    ) -> PathBuf {
+        let variation_directory =
+            PathBuf::from(format!("{REMOTE_DIR}/{timestamp}/{run}"));
+
+        // Create the variation directory
+        // TODO(joren): handle the fail case for run_command
+        ssh::run_command(
+            &sessions,
+            &[
+                "mkdir".into(),
+                "-p".into(),
+                variation_directory.to_string_lossy().to_string(),
+            ],
+        )
+        .await
+        .unwrap();
+
+        variation_directory
+    }
+
+    fn filter_host_sessions(
+        sessions: &Sessions,
+        hosts: &Vec<Host>,
+    ) -> Sessions {
         sessions
             .into_iter()
             .filter(|(key, _)| {
-                runners.into_iter().any(|runner| &runner.address == *key)
+                hosts.into_iter().any(|host| &host.address == *key)
             })
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect()
+    }
+
+    fn filter_exporter_sessions(
+        sessions: &Sessions,
+        exporters: &Vec<Exporter>,
+    ) -> Sessions {
+        sessions
+            .into_iter()
+            .filter(|(key, _)| {
+                exporters
+                    .into_iter()
+                    .any(|exporter| &exporter.address == *key)
+            })
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect()
+    }
+
+    async fn start_exporters(
+        sessions: &Sessions,
+        exporters: &Vec<Exporter>,
+        experiment_directory: &Path,
+    ) {
+        // for exporter in exporters.iter() {
+        //     let exporter_sessions =
+        //         Self::filter_exporter_sessions(sessions, exporters.address);
+        //     exporter.
+        // }
     }
 
     async fn run_remote_execution(
@@ -365,7 +398,7 @@ impl ExperimentRunner {
     ) {
         for stage in re.into_iter() {
             let setup_sessions =
-                Self::filter_sessions(sessions, &stage.runners);
+                Self::filter_host_sessions(sessions, &stage.hosts);
             for script in stage.scripts.iter() {
                 let script_path = script.canonicalize().unwrap();
 
@@ -417,14 +450,14 @@ impl ExperimentRunner {
     // that makes creating experiments easier on the user end. We handle all the cases
     // starting from this function.
 
-    fn unique_runners(experiments: &[Experiment]) -> HashSet<&Runner> {
-        let mut unique_runners = HashSet::new();
+    fn unique_hosts(experiments: &[Experiment]) -> HashSet<&Host> {
+        let mut unique_hosts = HashSet::new();
         for experiment in experiments.iter() {
-            for runner in experiment.runners.iter() {
-                unique_runners.insert(runner);
+            for host in experiment.hosts.iter() {
+                unique_hosts.insert(host);
             }
         }
-        unique_runners
+        unique_hosts
     }
 }
 
