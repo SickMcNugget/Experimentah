@@ -3,9 +3,12 @@ use axum::response::IntoResponse;
 use log::error;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashSet;
+use std::fmt::Display;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::{fs, io};
+
+use crate::STORAGE_DIR;
 
 type Result<T> = std::result::Result<T, ParseError>;
 
@@ -423,7 +426,6 @@ impl ExperimentConfig {
         //     ))
         // })?;
 
-
         for setup in self.setup.iter() {
             setup.validate(config).map_err(|e| {
                 ParseError::from((
@@ -686,6 +688,20 @@ pub struct RemoteExecution {
     pub scripts: Vec<PathBuf>,
 }
 
+enum RemoteExecutionType {
+    Setup,
+    Teardown,
+}
+
+impl Display for RemoteExecutionType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match *self {
+            Self::Setup => write!(f, "setup"),
+            Self::Teardown => write!(f, "teardown"),
+        }
+    }
+}
+
 impl RemoteExecution {
     fn new(runners: Vec<Runner>, scripts: Vec<PathBuf>) -> Self {
         // let mapped_scripts =
@@ -741,6 +757,7 @@ fn map_exporters(config: &Config, exporters: &[String]) -> Vec<Exporter> {
 fn map_remote_executions(
     config: &Config,
     remote_executions: &[RemoteExecutionConfig],
+    remote_execution_type: RemoteExecutionType,
 ) -> Vec<RemoteExecution> {
     let mut mapped_remote_executions =
         Vec::with_capacity(remote_executions.len());
@@ -759,10 +776,24 @@ fn map_remote_executions(
                 }
             }
         }
-        mapped_remote_executions.push(RemoteExecution::new(
-            mapped_runners,
-            remote_execution.scripts.clone(),
-        ));
+
+        //TODO(joren): Handle filename unwrap error
+        let mapped_scripts: Vec<PathBuf> = remote_execution
+            .scripts
+            .iter()
+            .map(|script_path| {
+                let basename = script_path.file_name().unwrap();
+                PathBuf::from(format!(
+                    "{}/{}",
+                    STORAGE_DIR,
+                    remote_execution_type.to_string()
+                ))
+                .join(basename)
+            })
+            .collect();
+
+        mapped_remote_executions
+            .push(RemoteExecution::new(mapped_runners, mapped_scripts));
     }
     mapped_remote_executions
 }
@@ -810,8 +841,16 @@ pub fn generate_experiments(
             name: name.clone(),
             description: description.clone(),
             kind: kind.clone(),
-            setup: map_remote_executions(config, setup),
-            teardown: map_remote_executions(config, teardown),
+            setup: map_remote_executions(
+                config,
+                setup,
+                RemoteExecutionType::Setup,
+            ),
+            teardown: map_remote_executions(
+                config,
+                teardown,
+                RemoteExecutionType::Teardown,
+            ),
             runners: map_runners(config, runners),
             execute: execute.clone(),
             expected_arguments: expected_arguments,

@@ -1,6 +1,6 @@
 use crate::parse::{
     generate_experiments, Config, Experiment, ExperimentConfig, ExperimentRuns,
-    Runner,
+    RemoteExecution, Runner,
 };
 
 const MAX_EXPERIMENTS: usize = 32;
@@ -239,74 +239,88 @@ impl ExperimentRunner {
                     .await
                     .unwrap();
 
-                    for setup in experiment.setup.iter() {
-                        let setup_sessions: Sessions = sessions
-                            .iter()
-                            .filter(|(key, _)| {
-                                setup
-                                    .runners
-                                    .iter()
-                                    .any(|runner| &runner.address == *key)
-                            })
-                            .map(|(key, value)| (key.clone(), value.clone()))
-                            .collect();
+                    Self::run_remote_execution(
+                        &sessions,
+                        &experiment.setup,
+                        experiment_directory,
+                    )
+                    .await;
+                    // run_variation(&sessions, &experiment);
+                    Self::run_remote_execution(
+                        &sessions,
+                        &experiment.teardown,
+                        experiment_directory,
+                    )
+                    .await;
 
-                        for script in setup.scripts.iter() {
-                            // TODO(joren): handle the canonicalisation error
-                            let script_path = script.canonicalize().unwrap();
-                            //TODO(joren): Handle error case
-                            ssh::upload(
-                                &setup_sessions,
-                                &script_path,
-                                experiment_directory,
-                            )
-                            .await
-                            .unwrap();
-                            // TODO(joren): Handle error case
-                            let remote_script = experiment_directory
-                                .join(script.file_name().unwrap());
-                            ssh::run_script(&setup_sessions, &remote_script)
-                                .await
-                                .unwrap();
-                        }
-                    }
-
-                    for teardown in experiment.teardown.iter() {
-                        let teardown_sessions: Sessions = sessions
-                            .iter()
-                            .filter(|(key, _)| {
-                                teardown
-                                    .runners
-                                    .iter()
-                                    .any(|runner| &runner.address == *key)
-                            })
-                            .map(|(key, value)| (key.clone(), value.clone()))
-                            .collect();
-
-                        println!(
-                            "teardown sessions: {}",
-                            teardown_sessions.len()
-                        );
-
-                        for script in teardown.scripts.iter() {
-                            // TODO(joren): handle the canonicalisation error
-                            let script_path = script.canonicalize().unwrap();
-                            //TODO(joren): Handle error case
-                            ssh::upload(
-                                &teardown_sessions,
-                                &script_path,
-                                experiment_directory,
-                            )
-                            .await
-                            .unwrap();
-                            // TODO(joren): Handle error case
-                            let remote_script = experiment_directory
-                                .join(script.file_name().unwrap());
-                            ssh::run_script(&teardown_sessions, &remote_script)
-                                .await
-                                .unwrap();
-                        }
-                    }
+                    // for setup in experiment.setup.iter() {
+                    //     let setup_sessions: Sessions = sessions
+                    //         .iter()
+                    //         .filter(|(key, _)| {
+                    //             setup
+                    //                 .runners
+                    //                 .iter()
+                    //                 .any(|runner| &runner.address == *key)
+                    //         })
+                    //         .map(|(key, value)| (key.clone(), value.clone()))
+                    //         .collect();
+                    //
+                    //     for script in setup.scripts.iter() {
+                    //         // TODO(joren): handle the canonicalisation error
+                    //         let script_path = script.canonicalize().unwrap();
+                    //         //TODO(joren): Handle error case
+                    //         ssh::upload(
+                    //             &setup_sessions,
+                    //             &script_path,
+                    //             experiment_directory,
+                    //         )
+                    //         .await
+                    //         .unwrap();
+                    //         // TODO(joren): Handle error case
+                    //         let remote_script = experiment_directory
+                    //             .join(script.file_name().unwrap());
+                    //         ssh::run_script(&setup_sessions, &remote_script)
+                    //             .await
+                    //             .unwrap();
+                    //     }
+                    // }
+                    //
+                    // for teardown in experiment.teardown.iter() {
+                    //     let teardown_sessions: Sessions = sessions
+                    //         .iter()
+                    //         .filter(|(key, _)| {
+                    //             teardown
+                    //                 .runners
+                    //                 .iter()
+                    //                 .any(|runner| &runner.address == *key)
+                    //         })
+                    //         .map(|(key, value)| (key.clone(), value.clone()))
+                    //         .collect();
+                    //
+                    //     println!(
+                    //         "teardown sessions: {}",
+                    //         teardown_sessions.len()
+                    //     );
+                    //
+                    //     for script in teardown.scripts.iter() {
+                    //         // TODO(joren): handle the canonicalisation error
+                    //         let script_path = script.canonicalize().unwrap();
+                    //         //TODO(joren): Handle error case
+                    //         ssh::upload(
+                    //             &teardown_sessions,
+                    //             &script_path,
+                    //             experiment_directory,
+                    //         )
+                    //         .await
+                    //         .unwrap();
+                    //         // TODO(joren): Handle error case
+                    //         let remote_script = experiment_directory
+                    //             .join(script.file_name().unwrap());
+                    //         ssh::run_script(&teardown_sessions, &remote_script)
+                    //             .await
+                    //             .unwrap();
+                    //     }
+                    // }
 
                     // let command_args = vec!["cd".to_string(), ".ssh".into()];
                     // ssh::run_command_on_sessions(&sessions, &command_args)
@@ -331,6 +345,46 @@ impl ExperimentRunner {
             self.current_runs.store(0, Ordering::Relaxed);
             self.current_run.store(0, Ordering::Relaxed);
             *self.current_experiment.lock().await = None;
+        }
+    }
+
+    fn filter_sessions(sessions: &Sessions, runners: &Vec<Runner>) -> Sessions {
+        sessions
+            .into_iter()
+            .filter(|(key, _)| {
+                runners.into_iter().any(|runner| &runner.address == *key)
+            })
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect()
+    }
+
+    async fn run_remote_execution(
+        sessions: &Sessions,
+        re: &Vec<RemoteExecution>,
+        experiment_directory: &Path,
+    ) {
+        for stage in re.into_iter() {
+            let setup_sessions =
+                Self::filter_sessions(sessions, &stage.runners);
+            for script in stage.scripts.iter() {
+                let script_path = script.canonicalize().unwrap();
+
+                //TODO(joren): Handle error case
+                ssh::upload(
+                    &setup_sessions,
+                    &script_path,
+                    experiment_directory,
+                )
+                .await
+                .unwrap();
+
+                // TODO(joren): Handle error case
+                let remote_script =
+                    experiment_directory.join(script.file_name().unwrap());
+                ssh::run_script(&setup_sessions, &remote_script)
+                    .await
+                    .unwrap();
+            }
         }
     }
 

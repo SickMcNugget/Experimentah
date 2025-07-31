@@ -170,12 +170,12 @@ async fn upload(mut multipart: Multipart) -> Result<(), String> {
         }
     }
 
-    dbg!(&path, &file);
     let dir = path.parent().expect(
         "Expected a path containing directories and ending with a file",
     );
     std::fs::create_dir_all(dir).expect("Failed to create directory");
-    std::fs::write(path, file.unwrap());
+    std::fs::write(&path, file.unwrap()).expect("Failed to write file to disk");
+    info!("Saved file {:?} to {:?}", path.file_name().unwrap(), path);
 
     Ok(())
 }
