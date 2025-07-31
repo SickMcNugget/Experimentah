@@ -1,10 +1,12 @@
 use std::{
     env,
+    path::PathBuf,
     sync::{atomic::Ordering, Arc},
 };
 
 use axum::{
-    extract::State,
+    body::Bytes,
+    extract::{Multipart, State},
     routing::{get, post},
     Json, Router,
 };
@@ -18,6 +20,8 @@ use controller::{
 use log::{debug, error, info, trace, warn};
 
 type SharedRunState = Arc<RunState>;
+
+const STORAGE_DIR: &str = "storage";
 
 struct RunState {
     runner: Arc<ExperimentRunner>,
@@ -58,7 +62,8 @@ async fn index() -> &'static str {
     concat!(
         "`GET /` Gets all available experiments and their status\n",
         "`GET /status` Retrieves the current status of the runner. This shows if it is still running an experiment.\n",
-        "`POST /run { <execute_request> }` Executes a series of commands from the request\n"
+        "`POST /run { <execute_request> }` Executes a series of commands from the request\n",
+        "`POST /upload { <files> }` Uploads a list of local files to the controller, storing them in a well-known location",
     )
 }
 
@@ -108,6 +113,7 @@ fn router(run_state: SharedRunState) -> Router {
         .route("/", get(index))
         .route("/status", get(status))
         .route("/run", post(run))
+        .route("/upload", post(upload))
         .with_state(run_state)
 }
 
@@ -133,6 +139,43 @@ async fn run(
 
     run_state.runner.enqueue(experiments).await;
     info!("Enqueued experiments into the runner");
+
+    Ok(())
+}
+
+// TODO(joren): Make another concrete error type
+#[axum::debug_handler]
+async fn upload(mut multipart: Multipart) -> Result<(), String> {
+    let mut path: PathBuf = PathBuf::from(STORAGE_DIR);
+    let mut file: Option<Bytes> = None;
+
+    while let Some(field) = multipart.next_field().await.unwrap() {
+        let name = field.name().expect("No name sent as part of multipart");
+        match name {
+            "type" => match field.text().await.unwrap().as_str() {
+                "setup" => path.push("setup"),
+                "teardown" => path.push("teardown"),
+                "execute" => path.push("execute"),
+                _ => {
+                    panic!("Invalid file type received in upload");
+                }
+            },
+            "file" => {
+                path.push(field.file_name().unwrap().to_string());
+                file = Some(field.bytes().await.unwrap());
+            }
+            _ => {
+                panic!("Invalid multipart fields received");
+            }
+        }
+    }
+
+    dbg!(&path, &file);
+    let dir = path.parent().expect(
+        "Expected a path containing directories and ending with a file",
+    );
+    std::fs::create_dir_all(dir).expect("Failed to create directory");
+    std::fs::write(path, file.unwrap());
 
     Ok(())
 }

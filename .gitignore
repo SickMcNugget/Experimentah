@@ -3,3 +3,5 @@ node_modules/
 *.png
 metrics-api/docker/data/
 *.env
+controller/storage
+controller/cli

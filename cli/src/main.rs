@@ -11,6 +11,7 @@
 //  c. Dies
 
 use core::fmt;
+use std::collections::HashMap;
 use std::env;
 use std::error::Error;
 use std::path::PathBuf;
@@ -21,7 +22,7 @@ use clap::{Args, Parser};
 use controller::parse::{Config, ExperimentConfig};
 use controller::run::ExperimentRunner;
 
-use reqwest::blocking::Client;
+use reqwest::blocking::{multipart, Client};
 use reqwest::StatusCode;
 
 use std::time::Duration;
@@ -59,6 +60,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     } else if args.pathway.validate {
         validate_configs(&args.config, &args.experiment_config);
+        return Ok(());
+    } else if !args.pathway.upload.is_empty() {
+        upload_data(&client, &address, args.pathway.upload)?;
         return Ok(());
     }
 
@@ -157,6 +161,79 @@ fn validate_configs(
             eprintln!("Invalid config: {e}")
         }
     };
+}
+
+/// We make a few assumptions regarding uploaded files for ease-of-use
+/// on the part of the user.
+/// 1. If a file contains setup/teardown, then it is probably a setup/teardown
+/// script.
+/// 2. If they do not pass in a type (setup/teardown/execute), it will be treated
+/// as an execution script
+fn parse_upload(s: &str) -> Result<(PathBuf, String), String> {
+    let s = s.trim().replace("  ", " ");
+    let parts: Vec<&str> = s.splitn(2, " ").collect();
+
+    let filepath: PathBuf;
+    let filetype: String;
+
+    match parts.len() {
+        0 => return Err("No file passed in".to_string()),
+        1 => {
+            filepath = PathBuf::from(parts[0])
+                .canonicalize()
+                .expect("Unable to canonicalize filepath");
+            let filename = filepath
+                .file_name()
+                .expect("An uploaded file should have a basename")
+                .to_string_lossy();
+
+            if filename.contains("setup") {
+                filetype = "setup".to_string();
+            } else if filename.contains("teardown") {
+                filetype = "teardown".to_string();
+            } else {
+                filetype = "execute".to_string();
+            }
+        }
+        2 => {
+            filepath = PathBuf::from(parts[0])
+                .canonicalize()
+                .expect("Unable to canonicalize filepath");
+
+            match parts[1] {
+                "setup" | "teardown" | "execute" => {
+                    filetype = parts[1].to_string();
+                }
+                _ => {
+                    return Err("Invalid file type requested".to_string());
+                }
+            }
+        }
+        _ => {
+            panic!("We should not have received a parts vector with more than 2 members");
+        }
+    }
+    return Ok((filepath, filetype));
+}
+
+fn upload_data(
+    client: &Client,
+    address: &str,
+    blobs: Vec<(PathBuf, String)>,
+) -> Result<(), CliError> {
+    for (filepath, filetype) in blobs.into_iter() {
+        let form = multipart::Form::new()
+            .text("type", filetype)
+            .file("file", filepath)?;
+
+        let response = client
+            .post(format!("http://{address}/upload"))
+            .multipart(form)
+            .send()
+            .map_err(|e| ("Error checking status", e))?;
+        dbg!(response);
+    }
+    Ok(())
 }
 
 // fn check
@@ -301,4 +378,6 @@ struct ExecutionPathway {
     validate: bool,
     #[arg(short, long)]
     status: bool,
+    #[arg(short, long, value_delimiter = ',', value_parser = parse_upload)]
+    upload: Vec<(PathBuf, String)>,
 }

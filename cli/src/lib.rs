@@ -1,3 +1,5 @@
+use std::io;
+
 pub type Result<T> = std::result::Result<T, CliError>;
 
 #[derive(Debug)]
@@ -5,6 +7,7 @@ pub enum CliError {
     CliError(String, Box<CliError>),
     ReqwestError(String, reqwest::Error),
     GenericError(String),
+    IOError(String, io::Error),
 }
 
 impl std::fmt::Display for CliError {
@@ -14,6 +17,9 @@ impl std::fmt::Display for CliError {
                 write!(f, "{message}: {source}")
             }
             CliError::ReqwestError(ref message, ref source) => {
+                write!(f, "{message}: {source}")
+            }
+            CliError::IOError(ref message, ref source) => {
                 write!(f, "{message}: {source}")
             }
             CliError::GenericError(ref message) => write!(f, "{}", message),
@@ -26,6 +32,7 @@ impl std::error::Error for CliError {
         match *self {
             Self::CliError(.., ref source) => Some(source),
             Self::ReqwestError(.., ref source) => Some(source),
+            Self::IOError(.., ref source) => Some(source),
             Self::GenericError(_) => None,
             // Self::DeserializeError { ref source, .. } => Some(source),
             // Self::ValidationError(_) => None,
@@ -47,7 +54,13 @@ impl From<(&str, reqwest::Error)> for CliError {
 
 impl From<reqwest::Error> for CliError {
     fn from(value: reqwest::Error) -> Self {
-        CliError::ReqwestError("".into(), value)
+        CliError::ReqwestError("reqwest error".into(), value)
+    }
+}
+
+impl From<io::Error> for CliError {
+    fn from(value: io::Error) -> Self {
+        CliError::IOError("IO error".into(), value)
     }
 }
 
