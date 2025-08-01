@@ -211,11 +211,12 @@ impl ExperimentRunner {
                     let experiment_directory =
                         variation_directory.parent().unwrap();
 
-                    // Self::start_exporters(
-                    //     &sessions,
-                    //     &experiment.exporters,
-                    //     experiment_directory,
-                    // );
+                    Self::start_exporters(
+                        &sessions,
+                        &experiment.exporters,
+                        experiment_directory,
+                    )
+                    .await;
 
                     Self::run_remote_execution(
                         &sessions,
@@ -368,14 +369,12 @@ impl ExperimentRunner {
 
     fn filter_exporter_sessions(
         sessions: &Sessions,
-        exporters: &Vec<Exporter>,
+        exporter: &Exporter,
     ) -> Sessions {
         sessions
             .into_iter()
             .filter(|(key, _)| {
-                exporters.iter().any(|exporter| {
-                    exporter.hosts.iter().any(|host| &host.address == *key)
-                })
+                exporter.hosts.iter().any(|host| &host.address == *key)
             })
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect()
@@ -386,6 +385,16 @@ impl ExperimentRunner {
         exporters: &Vec<Exporter>,
         experiment_directory: &Path,
     ) {
+        // TODO(joren): Handle exporter setup
+        for exporter in exporters.iter() {
+            let exporter_sessions =
+                Self::filter_exporter_sessions(sessions, exporter);
+
+            //TODO(joren): Error check split
+            let comm = shlex::split(&exporter.command).unwrap();
+            ssh::run_command(&exporter_sessions, &comm).await;
+        }
+        println!("Finished running exporters");
         // for exporter in exporters.iter() {
         //     let exporter_sessions =
         //         Self::filter_exporter_sessions(sessions, exporters.address);

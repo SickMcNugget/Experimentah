@@ -640,7 +640,7 @@ impl Experiment {
     }
 }
 
-#[derive(Debug, Hash, Eq, PartialEq)]
+#[derive(Debug, Clone, Hash, Eq, PartialEq)]
 pub struct Host {
     pub name: String,
     pub address: String,
@@ -681,7 +681,7 @@ pub struct Host {
 //     }
 // }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Exporter {
     pub name: String,
     pub hosts: Vec<Host>,
@@ -705,7 +705,7 @@ impl Exporter {
         }
     }
 }
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RemoteExecution {
     pub hosts: Vec<Host>,
     pub scripts: Vec<PathBuf>,
@@ -905,6 +905,7 @@ fn check_files_exist(files: &[PathBuf]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
     use std::path::PathBuf;
     use std::str::FromStr;
 
@@ -1069,32 +1070,67 @@ mod tests {
             super::generate_experiments(&config, &experiment_config).unwrap();
 
         let basepath = std::path::absolute(PathBuf::from("storage")).unwrap();
+
+        let re_host = Host {
+            name: "runner1".to_string(),
+            address: "localhost".to_string(),
+        };
+
+        let scripts: HashMap<&str, PathBuf> = HashMap::from([
+            ("setup", basepath.join("setup/test-setup.sh")),
+            ("teardown", basepath.join("teardown/test-teardown.sh")),
+            ("execute", basepath.join("execute/actual-work.sh")),
+        ]);
+
+        let mut remote_executions: HashMap<&str, Vec<RemoteExecution>> =
+            HashMap::with_capacity(scripts.len());
+        for (stage, script) in scripts.iter() {
+            remote_executions.insert(
+                stage,
+                vec![RemoteExecution {
+                    hosts: vec![re_host.clone()],
+                    scripts: vec![script.clone()],
+                }],
+            );
+        }
+
+        let exporters = HashMap::from([
+            (
+                "test-exporter",
+                Exporter {
+                    name: "test-exporter".to_string(),
+                    hosts: vec![re_host.clone()],
+                    command: "sar -o collection.bin".to_string(),
+                    setup: vec![
+                        "dnf install -y sysstat".to_string(),
+                        "apt install -y sysstat".to_string(),
+                    ],
+                },
+            ),
+            (
+                "another-test-exporter",
+                Exporter {
+                    name: "another-test-exporter".into(),
+                    hosts: vec![Host {
+                        name: "runner1".into(),
+                        address: "localhost".into(),
+                    }],
+                    command: "my_collector".into(),
+                    setup: vec![],
+                },
+            ),
+        ]);
+
         let expected_experiments = vec![
             Experiment {
                 id: None,
                 name: "localhost-experiment".to_string(),
                 description: "Testing the functionality of the software completely using localhost".into(),
                 kind: "localhost-result".into(),
-                setup: vec![RemoteExecution{
-                    hosts: vec![Host {
-                    name: "runner1".into(),
-                    address: "localhost".into() },
-                    ],
-                    scripts: vec![basepath.join("setup/test-setup.sh")]}
-                ],
-                teardown: vec![RemoteExecution{
-                    hosts: vec![Host {
-                        name: "runner1".into(),
-                        address: "localhost".into(),
-                    }],
-                    scripts: vec![basepath.join("teardown/test-teardown.sh")]
-                }],
-                hosts: vec![Host {
-                    name: "runner1".into(),
-                    address: "localhost".into(),
-                    }],
-
-                execute: basepath.join("execute/actual-work.sh"),
+                setup: remote_executions["setup"].clone(),
+                teardown: remote_executions["teardown"].clone(),
+                hosts: vec![re_host.clone()],
+                execute: scripts["execute"].clone(),
                 expected_arguments: Some(2),
                 arguments: vec!["Argument 1".into(), "Argument 2".into()],
                 exporters: vec![]
@@ -1104,25 +1140,10 @@ mod tests {
                 name: "different args".to_string(),
                 description: "Testing the functionality of the software completely using localhost".into(),
                 kind: "localhost-result".into(),
-                setup: vec![RemoteExecution{
-                hosts: vec![Host {
-                name: "runner1".into(),
-                address: "localhost".into(),
-                }],
-                scripts: vec![basepath.join("setup/test-setup.sh")]}],
-                teardown: vec![RemoteExecution{
-                    hosts: vec![Host {
-                        name: "runner1".into(),
-                        address: "localhost".into(),
-                    }],
-                    scripts: vec![basepath.join("teardown/test-teardown.sh")]
-                }],
-                hosts: vec![Host {
-                    name: "runner1".into(),
-                    address: "localhost".into(),
-                    }],
-
-                execute: basepath.join("execute/actual-work.sh"),
+                setup: remote_executions["setup"].clone(),
+                teardown: remote_executions["teardown"].clone(),
+                hosts: vec![re_host.clone()],
+                execute: scripts["execute"].clone(),
                 arguments: vec!["Argument 1".into()],
                 expected_arguments: Some(1),
                 exporters: vec![]
@@ -1132,81 +1153,26 @@ mod tests {
                 name: "with exporter".to_string(),
                 description: "Testing the functionality of the software completely using localhost".into(),
                 kind: "localhost-result".into(),
-                setup: vec![RemoteExecution{
-                hosts: vec![Host {
-                name: "runner1".into(),
-                address: "localhost".into(),
-                }],
-                scripts: vec![basepath.join("setup/test-setup.sh")]}],
-                teardown: vec![RemoteExecution{
-                    hosts: vec![Host {
-                        name: "runner1".into(),
-                        address: "localhost".into(),
-                    }],
-                    scripts: vec![basepath.join("teardown/test-teardown.sh")]
-                }],
-                hosts: vec![Host {
-                    name: "runner1".into(),
-                    address: "localhost".into(),
-                    }],
-
-                execute: basepath.join("execute/actual-work.sh"),
+                setup: remote_executions["setup"].clone(),
+                teardown: remote_executions["teardown"].clone(),
+                hosts: vec![re_host.clone()],
+                execute: scripts["execute"].clone(),
                 expected_arguments: Some(2),
                 arguments: vec!["Argument 1".into(), "Argument 2".into()],
-                exporters: vec![Exporter{
-                    name: "test-exporter".into(),
-                    hosts: vec![Host {
-                        name: "runner1".into(),
-                        address: "localhost".into() },
-                    ],
-                    command: "sar -o collection.bin".into(),
-                    setup: vec!["dnf install -y sysstat".into(), "apt install -y sysstat".into()],
-                }]
+                exporters: vec![exporters["test-exporter"].clone()]
             },
             Experiment {
                 id: None,
                 name: "with multiple exporters".to_string(),
                 description: "Testing the functionality of the software completely using localhost".into(),
                 kind: "localhost-result".into(),
-                setup: vec![RemoteExecution{
-                hosts: vec![Host {
-                name: "runner1".into(),
-                address: "localhost".into(),
-                },
-                ],
-                scripts: vec![basepath.join("setup/test-setup.sh")]}],
-                teardown: vec![RemoteExecution{
-                    hosts: vec![Host {
-                        name: "runner1".into(),
-                        address: "localhost".into(),
-                    }],
-                    scripts: vec![basepath.join("teardown/test-teardown.sh")]
-                }],
-                hosts: vec![Host {
-                    name: "runner1".into(),
-                    address: "localhost".into(),
-                    }],
-                execute: basepath.join("execute/actual-work.sh"),
+                setup: remote_executions["setup"].clone(),
+                teardown: remote_executions["teardown"].clone(),
+                hosts: vec![re_host.clone()],
+                execute: scripts["execute"].clone(),
                 expected_arguments: Some(2),
                 arguments: vec!["Argument 1".into(), "Argument 2".into()],
-                exporters: vec![Exporter{
-                    name: "test-exporter".into(),
-                    hosts: vec![Host {
-                        name: "runner1".into(),
-                        address: "localhost".into() },
-                    ],
-                    command: "sar -o collection.bin".into(),
-                    setup: vec!["dnf install -y sysstat".into(), "apt install -y sysstat".into()],
-                },
-                    Exporter {
-                        name: "another-test-exporter".into(),
-                        hosts: vec![Host {
-                            name: "runner1".into(),
-                            address: "localhost".into() },
-                        ],
-                        command: "my_collector".into(),
-                        setup: vec![],
-                }]
+                exporters: vec![exporters["test-exporter"].clone(), exporters["another-test-exporter"].clone()]
             },
         ];
 
