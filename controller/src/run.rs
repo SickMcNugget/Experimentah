@@ -8,7 +8,7 @@ const MAX_EXPERIMENTS: usize = 32;
 const RUN_POLL_SLEEP: Duration = Duration::from_millis(250);
 
 use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::path::{self, PathBuf};
 // use reqwest::Client;
 use log::{error, info};
 use std::process::{Child, Command};
@@ -175,7 +175,7 @@ impl ExperimentRunner {
             let ts = match SystemTime::now().duration_since(UNIX_EPOCH) {
                 Ok(ts) => ts.as_millis(),
                 Err(e) => {
-                    error!("The current time is before the unix epoch.");
+                    error!("Error getting the time since epoch: {e}");
                     continue;
                 }
             };
@@ -211,11 +211,11 @@ impl ExperimentRunner {
                     let experiment_directory =
                         variation_directory.parent().unwrap();
 
-                    Self::start_exporters(
-                        &sessions,
-                        &experiment.exporters,
-                        experiment_directory,
-                    );
+                    // Self::start_exporters(
+                    //     &sessions,
+                    //     &experiment.exporters,
+                    //     experiment_directory,
+                    // );
 
                     Self::run_remote_execution(
                         &sessions,
@@ -223,6 +223,8 @@ impl ExperimentRunner {
                         experiment_directory,
                     )
                     .await;
+
+                    // ssh::upload(&sessions, source_path, destination_path)
 
                     // run_variation(&sessions, &experiment);
                     Self::run_remote_execution(
@@ -371,9 +373,9 @@ impl ExperimentRunner {
         sessions
             .into_iter()
             .filter(|(key, _)| {
-                exporters
-                    .into_iter()
-                    .any(|exporter| &exporter.address == *key)
+                exporters.iter().any(|exporter| {
+                    exporter.hosts.iter().any(|host| &host.address == *key)
+                })
             })
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect()
@@ -400,16 +402,12 @@ impl ExperimentRunner {
             let setup_sessions =
                 Self::filter_host_sessions(sessions, &stage.hosts);
             for script in stage.scripts.iter() {
-                let script_path = script.canonicalize().unwrap();
+                assert!(script.exists());
 
                 //TODO(joren): Handle error case
-                ssh::upload(
-                    &setup_sessions,
-                    &script_path,
-                    experiment_directory,
-                )
-                .await
-                .unwrap();
+                ssh::upload(&setup_sessions, &script, experiment_directory)
+                    .await
+                    .unwrap();
 
                 // TODO(joren): Handle error case
                 let remote_script =

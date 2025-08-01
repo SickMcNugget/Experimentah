@@ -1,5 +1,6 @@
 // use futures_core::stream::Stream;
 use futures_util::StreamExt;
+use log::info;
 use openssh::{Error, KnownHosts, Session};
 use openssh_sftp_client::{
     fs::Dir,
@@ -188,7 +189,7 @@ pub async fn upload(
 
     for task in tasks {
         let output = task.await?;
-        println!("{}", String::from_utf8(output.stdout).unwrap());
+        // println!("{}", String::from_utf8(output.stdout).unwrap());
     }
 
     Ok(())
@@ -227,7 +228,7 @@ pub async fn run_command(
                         SSHError::OutputError(format!("Failed to convert stderr bytes to UTF-8 for command '{command_c}' on host '{host_c}'"), e)
                     })?;
 
-                    println!("'{host_c}'\nstdout\n{stdout}\nstderr\n{stderr}");
+                    // println!("'{host_c}'\nstdout\n{stdout}\nstderr\n{stderr}");
                 }
                 Err(e) => {
                     panic!( "Output failed for host {host_c} with error: {e}");
@@ -276,7 +277,8 @@ pub async fn run_script(
                         SSHError::OutputError(format!("Failed to convert stderr bytes to UTF-8 for script '{script_c}' on host '{host_c}'"), e)
                     })?;
 
-                    println!("'{host_c}'\nstdout\n{stdout}\nstderr\n{stderr}");
+                    info!("Command success on '{host_c}'");
+                    // println!("'{host_c}'\nstdout\n{stdout}\nstderr\n{stderr}");
                 }
                 Err(e) => {
                     panic!( "Output failed for host {host_c} with error: {e}");

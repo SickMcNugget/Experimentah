@@ -72,14 +72,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config: Config = Config::from_file(config)?;
     println!("Successfully parsed config");
-    config.validate()?;
-    println!("Successfully validated config");
+    // TODO(joren): This shouldn't really return Ok()
+    match config.validate() {
+        Ok(()) => println!("Successfully validated config"),
+        Err(e) => {
+            eprintln!("{e}");
+            return Ok(());
+        }
+    }
+    // println!("Successfully validated config");
 
     let experiment_config: ExperimentConfig =
         ExperimentConfig::from_file(experiment_config)?;
     println!("Successfully parsed experiment config");
-    experiment_config.validate(&config)?;
-    println!("Successfully validated experiment_config");
+
+    // TODO(joren): This shouldn't really return Ok()
+    match experiment_config.validate(&config) {
+        Ok(()) => println!("Successfully validated experiment_config"),
+        Err(e) => {
+            eprintln!("{e}");
+            return Ok(());
+        }
+    }
 
     let res = client
         .post(format!("http://{address}/run"))

@@ -102,6 +102,15 @@ impl From<(&str, std::io::Error)> for ParseError {
     }
 }
 
+impl From<std::io::Error> for ParseError {
+    fn from(value: std::io::Error) -> Self {
+        ParseError::IOError {
+            message: "IO Error".to_string(),
+            source: value,
+        }
+    }
+}
+
 impl From<(&str, toml::de::Error)> for ParseError {
     fn from(value: (&str, toml::de::Error)) -> Self {
         ParseError::DeserializeError {
@@ -408,9 +417,9 @@ impl ExperimentConfig {
         // })?;
 
         for setup in self.setup.iter() {
-            setup.validate(config).map_err(|e| {
+            setup.validate(config, &self.name).map_err(|e| {
                 ParseError::from((
-                    format!("Invalid setup for experiment '{}'", self.name),
+                    format!("Invalid setup for experiment '{}'", &self.name),
                     e,
                 ))
             })?;
@@ -422,9 +431,12 @@ impl ExperimentConfig {
         //     &self.arguments,
         // )?;
 
+        hosts_check(&config.hosts, &self.hosts, &self.name)?;
+        exporters_check(&config.exporters, &self.exporters, &self.name)?;
+
         for (i, variation) in self.variations.iter().enumerate() {
             let name = variation.name.as_ref().unwrap_or(&self.name);
-            variation.validate(config).map_err(|e| {
+            variation.validate(config, &self.name).map_err(|e| {
                 ParseError::from((
                     format!(
                         "Invalid variation (index {i}) for experiment '{}'",
@@ -457,7 +469,7 @@ impl ExperimentConfig {
         }
 
         for teardown in self.teardown.iter() {
-            teardown.validate(config).map_err(|e| {
+            teardown.validate(config, &self.name).map_err(|e| {
                 ParseError::from((
                     format!(
                         "Invalid teardown for experiment '{}': {:?}",
@@ -468,20 +480,48 @@ impl ExperimentConfig {
             })?;
         }
 
-        for exporter in self.exporters.iter() {
-            if !config
-                .exporters
-                .iter()
-                .any(|c_exporter| c_exporter.name == *exporter)
-            {
-                Err(ParseError::ValidationError(format!(
-                    "Invalid exporter for experiment '{}': {}",
-                    self.name, exporter
-                )))?;
-            }
-        }
         Ok(())
     }
+}
+
+// fn
+
+fn hosts_check(
+    c_hosts: &[HostConfig],
+    hosts: &[String],
+    experiment_name: &str,
+) -> Result<()> {
+    for host in hosts.iter() {
+        if !c_hosts.iter().any(|c_host| c_host.name == *host) {
+            Err(ParseError::ValidationError(format!(
+                "Invalid host definition for experiment '{experiment_name}': got '{host}', expected one of {:?}",
+                c_hosts
+                    .iter()
+                    .map(|c_host| &c_host.name)
+                    .collect::<Vec<&String>>()
+            )))?;
+        }
+    }
+    Ok(())
+}
+
+fn exporters_check(
+    c_exporters: &[ExporterConfig],
+    exporters: &[String],
+    experiment_name: &str,
+) -> Result<()> {
+    for exporter in exporters.iter() {
+        if !c_exporters
+            .iter()
+            .any(|c_exporter| c_exporter.name == *exporter)
+        {
+            Err(ParseError::ValidationError(format!(
+                "Invalid exporter for experiment '{experiment_name}': got '{exporter}', expected one of {:?}",
+                c_exporters.iter().map(|c_exporter| &c_exporter.name).collect::<Vec<&String>>()
+            )))?;
+        }
+    }
+    Ok(())
 }
 
 /// Each variation of an experiment is able to override the top level of the
@@ -502,28 +542,18 @@ pub struct VariationConfig {
 }
 
 impl VariationConfig {
-    pub fn validate(&self, config: &Config) -> Result<()> {
-        for host in self.hosts.iter() {
-            if !config.hosts.iter().any(|c_host| c_host.name == *host) {
-                Err(ParseError::ValidationError(format!(
-                    "Invalid host definition {}",
-                    host
-                )))?;
-            }
-        }
+    pub fn validate(
+        &self,
+        config: &Config,
+        experiment_name: &str,
+    ) -> Result<()> {
+        let name = match &self.name {
+            Some(name) => name,
+            None => &experiment_name.to_string(),
+        };
 
-        for exporter in self.exporters.iter() {
-            if !config
-                .exporters
-                .iter()
-                .any(|c_exporter| c_exporter.name == *exporter)
-            {
-                return Err(ParseError::ValidationError(format!(
-                    "Invalid exporter definition {}",
-                    exporter
-                )));
-            }
-        }
+        hosts_check(&config.hosts, &self.hosts, name)?;
+        exporters_check(&config.exporters, &self.exporters, name)?;
 
         Ok(())
     }
@@ -552,15 +582,12 @@ impl RemoteExecutionConfig {
         Ok(commands)
     }
 
-    pub fn validate(&self, config: &Config) -> Result<()> {
-        for host in self.hosts.iter() {
-            if !config.hosts.iter().any(|c_host| c_host.name == *host) {
-                Err(ParseError::ValidationError(format!(
-                    "Invalid host definition: {host}"
-                )))?;
-            }
-        }
-
+    pub fn validate(
+        &self,
+        config: &Config,
+        experiment_name: &str,
+    ) -> Result<()> {
+        hosts_check(&config.hosts, &self.hosts, experiment_name)?;
         // TODO(joren): Return this check
         // check_files_exist(&self.scripts).map_err(|e| {
         //     ParseError::from(("Missing files for setup/teardown", e))
@@ -586,20 +613,30 @@ pub struct Experiment {
 
 impl Experiment {
     pub fn hosts(&self) -> Vec<String> {
-        let mut unique_hosts: Vec<String> = self
-            .hosts
-            .iter()
-            .map(|host| host.address.clone())
-            .chain(
-                self.exporters
-                    .iter()
-                    .map(|exporter| exporter.address.clone()),
-            )
-            .collect();
+        let mut hosts: HashSet<String> = HashSet::new();
+        for host in self.hosts.iter() {
+            hosts.insert(host.address.clone());
+        }
 
-        unique_hosts.sort();
-        unique_hosts.dedup();
-        unique_hosts
+        for exporter in self.exporters.iter() {
+            for host in exporter.hosts.iter() {
+                hosts.insert(host.address.clone());
+            }
+        }
+
+        for stage in self.setup.iter() {
+            for host in stage.hosts.iter() {
+                hosts.insert(host.address.clone());
+            }
+        }
+
+        for stage in self.teardown.iter() {
+            for host in stage.hosts.iter() {
+                hosts.insert(host.address.clone());
+            }
+        }
+
+        hosts.drain().collect::<Vec<String>>()
     }
 }
 
@@ -647,7 +684,8 @@ pub struct Host {
 #[derive(Debug, PartialEq)]
 pub struct Exporter {
     pub name: String,
-    pub address: String,
+    pub hosts: Vec<Host>,
+    // pub address: String,
     pub command: String,
     pub setup: Vec<String>,
 }
@@ -655,13 +693,13 @@ pub struct Exporter {
 impl Exporter {
     fn new(
         name: String,
-        address: String,
+        hosts: Vec<Host>,
         command: String,
         setup: Vec<String>,
     ) -> Self {
         Self {
             name,
-            address,
+            hosts,
             command,
             setup,
         }
@@ -694,7 +732,7 @@ impl RemoteExecution {
 }
 
 fn map_hosts(config: &Config, hosts: &[String]) -> Vec<Host> {
-    config
+    let mapped_hosts = config
         .hosts
         .iter()
         .filter(|c_host| hosts.contains(&c_host.name))
@@ -702,41 +740,45 @@ fn map_hosts(config: &Config, hosts: &[String]) -> Vec<Host> {
             name: c_host.name.clone(),
             address: c_host.address.clone(),
         })
-        .collect()
+        .collect::<Vec<Host>>();
+
+    mapped_hosts
 }
 
 fn map_exporters(config: &Config, exporters: &[String]) -> Vec<Exporter> {
-    let mut mapped_exporters = Vec::with_capacity(exporters.len());
-    for c_exporter in config.exporters.iter() {
-        for exporter in exporters.iter() {
-            if c_exporter.name == *exporter {
-                for host in c_exporter.hosts.iter() {
-                    let c_host = config.hosts.iter().find(|c_host| c_host.name == *host)
-                    .expect("We should not fail to cross-reference at this point.");
-                    mapped_exporters.push(Exporter::new(
-                        c_exporter.name.to_string(),
-                        c_host.address.to_string(),
-                        c_exporter.command.to_string(),
-                        c_exporter.setup.clone(),
-                    ));
-                }
-            }
-        }
-    }
-    mapped_exporters
+    config
+        .exporters
+        .iter()
+        .filter(|c_exporter| {
+            exporters
+                .iter()
+                .any(|exporter| exporter == &c_exporter.name)
+        })
+        .map(|c_exporter| {
+            let hosts = map_hosts(config, &c_exporter.hosts);
+
+            Exporter::new(
+                c_exporter.name.to_string(),
+                hosts,
+                c_exporter.command.to_string(),
+                c_exporter.setup.clone(),
+            )
+        })
+        .collect()
 }
 
-fn remap_execute(execute: &PathBuf) -> PathBuf {
+fn remap_execute(execute: &PathBuf) -> Result<PathBuf> {
     //TODO(joren): handle filename unwrap error
     let basename = execute.file_name().unwrap();
-    PathBuf::from(format!("{STORAGE_DIR}/execute")).join(basename)
+    let path = PathBuf::from(format!("{STORAGE_DIR}/execute")).join(basename);
+    std::path::absolute(path).map_err(|e| ParseError::from(e))
 }
 
 fn map_remote_executions(
     config: &Config,
     remote_executions: &[RemoteExecutionConfig],
     remote_execution_type: RemoteExecutionType,
-) -> Vec<RemoteExecution> {
+) -> Result<Vec<RemoteExecution>> {
     let mut mapped_remote_executions =
         Vec::with_capacity(remote_executions.len());
 
@@ -754,24 +796,23 @@ fn map_remote_executions(
         }
 
         //TODO(joren): Handle filename unwrap error
-        let mapped_scripts: Vec<PathBuf> = remote_execution
-            .scripts
-            .iter()
-            .map(|script_path| {
-                let basename = script_path.file_name().unwrap();
-                PathBuf::from(format!(
-                    "{}/{}",
-                    STORAGE_DIR,
-                    remote_execution_type.to_string()
-                ))
-                .join(basename)
-            })
-            .collect();
+        let mut mapped_scripts: Vec<PathBuf> =
+            Vec::with_capacity(remote_execution.scripts.len());
 
+        for script in remote_execution.scripts.iter() {
+            let basename = script.file_name().unwrap();
+            let new_path = PathBuf::from(format!(
+                "{}/{}",
+                STORAGE_DIR,
+                remote_execution_type.to_string()
+            ))
+            .join(basename);
+            mapped_scripts.push(std::path::absolute(new_path)?);
+        }
         mapped_remote_executions
             .push(RemoteExecution::new(mapped_hosts, mapped_scripts));
     }
-    mapped_remote_executions
+    Ok(mapped_remote_executions)
 }
 
 pub type ExperimentRuns = (u16, Vec<Experiment>);
@@ -779,7 +820,7 @@ pub type ExperimentRuns = (u16, Vec<Experiment>);
 pub fn generate_experiments(
     config: &Config,
     experiment_config: &ExperimentConfig,
-) -> ExperimentRuns {
+) -> Result<ExperimentRuns> {
     let name = &experiment_config.name;
     let description = &experiment_config.description;
     let kind = &experiment_config.kind;
@@ -825,20 +866,20 @@ pub fn generate_experiments(
                 config,
                 setup,
                 RemoteExecutionType::Setup,
-            ),
+            )?,
             teardown: map_remote_executions(
                 config,
                 teardown,
                 RemoteExecutionType::Teardown,
-            ),
+            )?,
             hosts: map_hosts(config, hosts),
-            execute: remap_execute(execute),
+            execute: remap_execute(execute)?,
             expected_arguments: expected_arguments,
             arguments: arguments.clone(),
             exporters: map_exporters(config, exporters),
         });
     }
-    (experiment_config.runs, experiments)
+    Ok((experiment_config.runs, experiments))
 }
 
 fn check_file_exists(file: &Path) -> io::Result<()> {
@@ -1025,7 +1066,9 @@ mod tests {
         }
 
         let experiments =
-            super::generate_experiments(&config, &experiment_config);
+            super::generate_experiments(&config, &experiment_config).unwrap();
+
+        let basepath = std::path::absolute(PathBuf::from("storage")).unwrap();
         let expected_experiments = vec![
             Experiment {
                 id: None,
@@ -1037,21 +1080,21 @@ mod tests {
                     name: "runner1".into(),
                     address: "localhost".into() },
                     ],
-                    scripts: vec![PathBuf::from("storage/setup/test-setup.sh")]}
+                    scripts: vec![basepath.join("setup/test-setup.sh")]}
                 ],
                 teardown: vec![RemoteExecution{
                     hosts: vec![Host {
                         name: "runner1".into(),
                         address: "localhost".into(),
                     }],
-                    scripts: vec![PathBuf::from("storage/teardown/test-teardown.sh")]
+                    scripts: vec![basepath.join("teardown/test-teardown.sh")]
                 }],
                 hosts: vec![Host {
                     name: "runner1".into(),
                     address: "localhost".into(),
                     }],
 
-                execute: PathBuf::from("storage/execute/actual-work.sh"),
+                execute: basepath.join("execute/actual-work.sh"),
                 expected_arguments: Some(2),
                 arguments: vec!["Argument 1".into(), "Argument 2".into()],
                 exporters: vec![]
@@ -1065,22 +1108,21 @@ mod tests {
                 hosts: vec![Host {
                 name: "runner1".into(),
                 address: "localhost".into(),
-                },
-                ],
-                scripts: vec![PathBuf::from("storage/setup/test-setup.sh")]}],
+                }],
+                scripts: vec![basepath.join("setup/test-setup.sh")]}],
                 teardown: vec![RemoteExecution{
                     hosts: vec![Host {
                         name: "runner1".into(),
                         address: "localhost".into(),
                     }],
-                    scripts: vec![PathBuf::from("storage/teardown/test-teardown.sh")]
+                    scripts: vec![basepath.join("teardown/test-teardown.sh")]
                 }],
                 hosts: vec![Host {
                     name: "runner1".into(),
                     address: "localhost".into(),
                     }],
 
-                execute: PathBuf::from("storage/execute/actual-work.sh"),
+                execute: basepath.join("execute/actual-work.sh"),
                 arguments: vec!["Argument 1".into()],
                 expected_arguments: Some(1),
                 exporters: vec![]
@@ -1094,27 +1136,29 @@ mod tests {
                 hosts: vec![Host {
                 name: "runner1".into(),
                 address: "localhost".into(),
-                },
-                ],
-                scripts: vec![PathBuf::from("storage/setup/test-setup.sh")]}],
+                }],
+                scripts: vec![basepath.join("setup/test-setup.sh")]}],
                 teardown: vec![RemoteExecution{
                     hosts: vec![Host {
                         name: "runner1".into(),
                         address: "localhost".into(),
                     }],
-                    scripts: vec![PathBuf::from("storage/teardown/test-teardown.sh")]
+                    scripts: vec![basepath.join("teardown/test-teardown.sh")]
                 }],
                 hosts: vec![Host {
                     name: "runner1".into(),
                     address: "localhost".into(),
                     }],
 
-                execute: PathBuf::from("storage/execute/actual-work.sh"),
+                execute: basepath.join("execute/actual-work.sh"),
                 expected_arguments: Some(2),
                 arguments: vec!["Argument 1".into(), "Argument 2".into()],
                 exporters: vec![Exporter{
                     name: "test-exporter".into(),
-                    address: "localhost".into(),
+                    hosts: vec![Host {
+                        name: "runner1".into(),
+                        address: "localhost".into() },
+                    ],
                     command: "sar -o collection.bin".into(),
                     setup: vec!["dnf install -y sysstat".into(), "apt install -y sysstat".into()],
                 }]
@@ -1130,31 +1174,36 @@ mod tests {
                 address: "localhost".into(),
                 },
                 ],
-                scripts: vec![PathBuf::from("storage/setup/test-setup.sh")]}],
+                scripts: vec![basepath.join("setup/test-setup.sh")]}],
                 teardown: vec![RemoteExecution{
                     hosts: vec![Host {
                         name: "runner1".into(),
                         address: "localhost".into(),
                     }],
-                    scripts: vec![PathBuf::from("storage/teardown/test-teardown.sh")]
+                    scripts: vec![basepath.join("teardown/test-teardown.sh")]
                 }],
                 hosts: vec![Host {
                     name: "runner1".into(),
                     address: "localhost".into(),
                     }],
-
-                execute: PathBuf::from("storage/execute/actual-work.sh"),
+                execute: basepath.join("execute/actual-work.sh"),
                 expected_arguments: Some(2),
                 arguments: vec!["Argument 1".into(), "Argument 2".into()],
                 exporters: vec![Exporter{
                     name: "test-exporter".into(),
-                    address: "localhost".into(),
+                    hosts: vec![Host {
+                        name: "runner1".into(),
+                        address: "localhost".into() },
+                    ],
                     command: "sar -o collection.bin".into(),
                     setup: vec!["dnf install -y sysstat".into(), "apt install -y sysstat".into()],
                 },
                     Exporter {
                         name: "another-test-exporter".into(),
-                        address: "localhost".into(),
+                        hosts: vec![Host {
+                            name: "runner1".into(),
+                            address: "localhost".into() },
+                        ],
                         command: "my_collector".into(),
                         setup: vec![],
                 }]

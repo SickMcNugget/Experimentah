@@ -134,7 +134,7 @@ async fn run(
     experiment_config.validate(&config)?;
     info!("Successfully validated configs");
 
-    let experiments = parse::generate_experiments(&config, &experiment_config);
+    let experiments = parse::generate_experiments(&config, &experiment_config)?;
     info!("Generated experiments from configs");
 
     run_state.runner.enqueue(experiments).await;
