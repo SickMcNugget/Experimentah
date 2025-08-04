@@ -87,6 +87,12 @@ impl From<(String, std::io::Error)> for RuntimeError {
     }
 }
 
+impl From<ssh::SSHError> for RuntimeError {
+    fn from(value: ssh::SSHError) -> Self {
+        RuntimeError::Generic(value.to_string())
+    }
+}
+
 // impl From<(String, reqwest::StatusCode)> for RuntimeError {
 //     fn from(value: (String, reqwest::StatusCode)) -> Self {
 //         RuntimeError::BadStatusCode(value.0, value.1)
@@ -367,34 +373,53 @@ impl ExperimentRunner {
             .collect()
     }
 
-    fn filter_exporter_sessions(
-        sessions: &Sessions,
-        exporter: &Exporter,
-    ) -> Sessions {
-        sessions
-            .into_iter()
-            .filter(|(key, _)| {
-                exporter.hosts.iter().any(|host| &host.address == *key)
-            })
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect()
-    }
+    // fn filter_exporter_sessions(
+    //     sessions: &Sessions,
+    //     exporter: &Exporter,
+    // ) -> Sessions {
+    //     sessions
+    //         .into_iter()
+    //         .filter(|(key, _)| {
+    //             exporter.hosts.iter().any(|host| &host.address == *key)
+    //         })
+    //         .map(|(key, value)| (key.clone(), value.clone()))
+    //         .collect()
+    // }
 
     async fn start_exporters(
         sessions: &Sessions,
         exporters: &Vec<Exporter>,
         experiment_directory: &Path,
-    ) {
-        // TODO(joren): Handle exporter setup
+    ) -> Result<()> {
         for exporter in exporters.iter() {
             let exporter_sessions =
-                Self::filter_exporter_sessions(sessions, exporter);
+                Self::filter_host_sessions(sessions, &exporter.hosts);
+
+            for setup in exporter.setup.iter() {
+                // TODO(joren): Handle shlex error
+                let setup_comm = shlex::split(&setup).unwrap();
+                ssh::run_command_at(
+                    &exporter_sessions,
+                    &setup_comm,
+                    experiment_directory,
+                )
+                .await?;
+            }
 
             //TODO(joren): Error check split
             let comm = shlex::split(&exporter.command).unwrap();
-            ssh::run_command(&exporter_sessions, &comm).await;
+            match ssh::run_command(&exporter_sessions, &comm).await {
+                Ok(()) => info!("Started exporter '{}'", exporter.name),
+                Err(e) => {
+                    error!(
+                        "Failed to start exporter '{}': {}",
+                        exporter.name, e
+                    )
+                }
+            }
         }
         println!("Finished running exporters");
+        Ok(())
         // for exporter in exporters.iter() {
         //     let exporter_sessions =
         //         Self::filter_exporter_sessions(sessions, exporters.address);

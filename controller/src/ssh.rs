@@ -6,6 +6,7 @@ use openssh_sftp_client::{
     fs::Dir,
     Sftp, SftpOptions,
 };
+use std::any::Any;
 use std::path::{Path, PathBuf};
 use std::string::FromUtf8Error;
 use std::{collections::HashMap, fs};
@@ -50,11 +51,34 @@ pub enum SSHError {
     StateError(String)
 }
 
+impl SSHError {
+    fn display_openssh_error(f: &mut fmt::Formatter<'_>, message: &str, source: &openssh::Error) -> fmt::Result {
+        write!(f, "{message}: ")?;
+        match source {
+            openssh::Error::Ssh(ssh_e) => {
+                write!(f, "{ssh_e}")?;
+            },
+            openssh::Error::Remote(remote_e) => {
+                match remote_e.kind() {
+                    io::ErrorKind::NotFound => {
+                        write!(f, "command not found")?;
+                    },
+                    _ => {
+                        write!(f, "{remote_e}")?;
+                    }
+                }
+            }
+            _ => write!(f, "{source}")?
+        }
+        Ok(())
+    }
+}
+
 impl fmt::Display for SSHError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
             Self::OpenSSHError(ref message, ref source) => {
-                write!(f, "{message}: {source}")?;
+                Self::display_openssh_error(f, message, source)?;
             },
             Self::OpenSSHSFTPError(ref message, ref source) => {
                 write!(f, "{message}: {source}")?;
@@ -106,6 +130,12 @@ impl std::error::Error for SSHError {
 impl From<openssh::Error> for SSHError {
     fn from(value: openssh::Error) -> Self {
         Self::OpenSSHError("openssh library error".to_string(), value)
+    }
+}
+
+impl From<(String, openssh::Error)> for SSHError {
+    fn from(value: (String, openssh::Error)) -> Self {
+        Self::OpenSSHError(value.0, value.1)
     }
 }
 
@@ -195,6 +225,16 @@ pub async fn upload(
     Ok(())
 }
 
+pub async fn run_command_at(
+    sessions: &Sessions,
+    command_args: &[String],
+    directory: &Path,
+) -> Result<()> {
+    let cd_command = vec!["cd".to_string(), directory.to_string_lossy().to_string(), "&&".to_string()];
+    let command_args: Vec<String> = cd_command.iter().chain(command_args).cloned().collect();
+    run_command(sessions, &command_args).await
+}
+
 pub async fn run_command(
     sessions: &Sessions,
     command_args: &[String]
@@ -210,13 +250,23 @@ pub async fn run_command(
 
         let host_c = host.clone();
         let session_c = session.clone();
-        // we can guarantee there is at least the initial command from our checks above
+
+        // We assume the use of bash
+        // TODO(joren): Add "sh" downgrade functionality
+        let interpreter = "bash";
+        // let command_c = command_args.first().unwrap().clone();
+        // let args_c = command_args[1..].to_vec();
+        // Since we run our command through bash, we should treat it as
+        // one single argument so that bash can do the splitting
         let command_c = command_args.first().unwrap().clone();
-        let args_c = command_args[1..].to_vec();
+        let command_args_c = command_args.join(" ");
 
         tasks.push(task::spawn(async move {
-            let mut s_command = session_c.session.command(&command_c);
-            s_command.args(args_c);
+            let mut s_command = session_c.session.command(interpreter);
+            s_command.arg("-c");
+
+            // let mut s_command = session_c.session.command(&command_c);
+            s_command.arg(&command_args_c);
 
             match s_command.output().await {
                 Ok(output) => {
@@ -228,10 +278,12 @@ pub async fn run_command(
                         SSHError::OutputError(format!("Failed to convert stderr bytes to UTF-8 for command '{command_c}' on host '{host_c}'"), e)
                     })?;
 
-                    // println!("'{host_c}'\nstdout\n{stdout}\nstderr\n{stderr}");
+                    println!("'{host_c}'\nstdout\n{stdout}\nstderr\n{stderr}");
                 }
                 Err(e) => {
-                    panic!( "Output failed for host {host_c} with error: {e}");
+                    Err((format!("Failed to run command '{command_args_c}' on host {host_c}"),e))?;
+                    // handle_openssh_error(&e);
+                    // panic!("Failed to run command {:?} on host {host_c}", std::iter::once(&command_c).chain(&args_c).collect::<Vec<&String>>());
                 }
             };
             Ok(())
@@ -243,6 +295,16 @@ pub async fn run_command(
         task.await??;
     }
     Ok(())
+}
+
+fn handle_openssh_error(e: &openssh::Error) {
+    match e {
+        openssh::Error::Remote(remote_e) => {
+            eprintln!("Error on remote occurred during SSH - {}: {e}", remote_e.kind());
+        },
+        _ => eprintln!("{e}")
+    }
+
 }
 
 /// Note that the script in question is run remotely,
@@ -264,20 +326,21 @@ pub async fn run_script(
 
         tasks.push(task::spawn(async move {
             let mut s_command = session_c.session.command("bash");
-            let script_c = script_c.to_string_lossy();
-            s_command.arg(&script_c);
+            let script_c_str = script_c.to_string_lossy();
+            s_command.arg(&script_c_str);
 
             match s_command.output().await {
                 Ok(output) => {
                     // format!("Failed to convert output for command '{command_c}' on host '{host_c}' to string.").as_str()
                     let stdout = String::from_utf8(output.stdout).map_err(|e| {
-                        SSHError::OutputError(format!("Failed to convert stdout bytes to UTF-8 for script '{script_c}' on host '{host_c}'"), e)
+                        SSHError::OutputError(format!("Failed to convert stdout bytes to UTF-8 for script '{script_c_str}' on host '{host_c}'"), e)
                     })?;
                     let stderr = String::from_utf8(output.stderr).map_err(|e| {
-                        SSHError::OutputError(format!("Failed to convert stderr bytes to UTF-8 for script '{script_c}' on host '{host_c}'"), e)
+                        SSHError::OutputError(format!("Failed to convert stderr bytes to UTF-8 for script '{script_c_str}' on host '{host_c}'"), e)
                     })?;
 
-                    info!("Command success on '{host_c}'");
+                    info!("Successfully ran script '{}' on '{host_c}'", script_c.file_name().unwrap().to_string_lossy());
+                    // info!("Command success on '{host_c}'");
                     // println!("'{host_c}'\nstdout\n{stdout}\nstderr\n{stderr}");
                 }
                 Err(e) => {
