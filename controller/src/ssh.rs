@@ -297,6 +297,15 @@ pub async fn run_command(
     Ok(())
 }
 
+pub async fn make_directory(sessions: &Sessions, path: &Path) -> Result<()> {
+    let path = path.to_string_lossy();
+        run_command(
+            sessions,
+            &["mkdir".into(), "-p".into(), path.to_string()],
+        )
+        .await
+}
+
 fn handle_openssh_error(e: &openssh::Error) {
     match e {
         openssh::Error::Remote(remote_e) => {

@@ -193,6 +193,12 @@ impl ExperimentRunner {
             );
 
             self.current_runs.store(runs, Ordering::Relaxed);
+            let hosts = Self::unique_hosts_for_all_experiments(&experiments);
+            // TODO(joren): Handle error connecting case
+            let sessions = ssh::connect_to_hosts(&hosts).await.unwrap();
+
+            // Ensure that our top-level directory exists
+            ssh::make_directory(&sessions, Path::new(REMOTE_DIR)).await;
 
             for i in 1..=runs {
                 self.current_run.store(i, Ordering::Relaxed);
@@ -207,13 +213,20 @@ impl ExperimentRunner {
                         *current_experiment = Some(experiment.name.clone());
                     }
 
+                    let variation_sessions = Self::filter_host_sessions(
+                        &sessions,
+                        &experiment.hosts,
+                    );
+
                     // TODO(joren): handle the result from connecting
                     let sessions = ssh::connect_to_hosts(&experiment.hosts())
                         .await
                         .unwrap();
 
                     let variation_directory =
-                        Self::make_variation_directory(&sessions, ts, i).await;
+                        PathBuf::from(format!("{REMOTE_DIR}/{ts}/{i}"));
+
+                    ssh::make_directory(&sessions, &variation_directory).await;
                     let experiment_directory =
                         variation_directory.parent().unwrap();
 
@@ -336,55 +349,39 @@ impl ExperimentRunner {
         }
     }
 
-    async fn make_variation_directory(
-        sessions: &Sessions,
-        timestamp: u128,
-        run: u16,
-    ) -> PathBuf {
-        let variation_directory =
-            PathBuf::from(format!("{REMOTE_DIR}/{timestamp}/{run}"));
-
-        // Create the variation directory
-        // TODO(joren): handle the fail case for run_command
-        ssh::run_command(
-            &sessions,
-            &[
-                "mkdir".into(),
-                "-p".into(),
-                variation_directory.to_string_lossy().to_string(),
-            ],
-        )
-        .await
-        .unwrap();
-
-        variation_directory
-    }
-
-    fn filter_host_sessions(
-        sessions: &Sessions,
-        hosts: &Vec<Host>,
-    ) -> Sessions {
+    fn filter_sessions(sessions: &Sessions, addresses: &[String]) -> Sessions {
         sessions
             .into_iter()
-            .filter(|(key, _)| {
-                hosts.into_iter().any(|host| &host.address == *key)
-            })
+            .filter(|(key, _)| addresses.contains(key))
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect()
     }
 
-    // fn filter_exporter_sessions(
-    //     sessions: &Sessions,
-    //     exporter: &Exporter,
-    // ) -> Sessions {
-    //     sessions
-    //         .into_iter()
-    //         .filter(|(key, _)| {
-    //             exporter.hosts.iter().any(|host| &host.address == *key)
-    //         })
-    //         .map(|(key, value)| (key.clone(), value.clone()))
-    //         .collect()
-    // }
+    /// This function should only be called once we know that 'hosts' contains
+    /// no duplicate values.
+    fn filter_host_sessions(sessions: &Sessions, hosts: &[Host]) -> Sessions {
+        let addresses: Vec<String> =
+            hosts.iter().map(|host| &host.address).cloned().collect();
+
+        Self::filter_sessions(sessions, &addresses)
+    }
+
+    /// Retrieves all the unique hosts used across a list of experiments.
+    /// This is useful for performing pre-run and post-run actions on these
+    /// hosts that are necessary for experimentah to function correctly.
+    /// These hosts should be filtered as required by each individual experiment variation.
+    fn unique_hosts_for_all_experiments(
+        experiments: &[Experiment],
+    ) -> Vec<String> {
+        let mut hosts: Vec<String> = experiments
+            .iter()
+            .flat_map(|experiment| experiment.hosts())
+            .collect();
+
+        hosts.sort();
+        hosts.dedup();
+        hosts
+    }
 
     async fn start_exporters(
         sessions: &Sessions,
@@ -408,6 +405,10 @@ impl ExperimentRunner {
 
             //TODO(joren): Error check split
             let comm = shlex::split(&exporter.command).unwrap();
+
+            // The exporter needs a file to be created which we can refer to in the event
+            // of an experimentah crash.
+            // We can make use of the flock command when running our exporters
             match ssh::run_command(&exporter_sessions, &comm).await {
                 Ok(()) => info!("Started exporter '{}'", exporter.name),
                 Err(e) => {
@@ -420,11 +421,6 @@ impl ExperimentRunner {
         }
         println!("Finished running exporters");
         Ok(())
-        // for exporter in exporters.iter() {
-        //     let exporter_sessions =
-        //         Self::filter_exporter_sessions(sessions, exporters.address);
-        //     exporter.
-        // }
     }
 
     async fn run_remote_execution(
@@ -451,29 +447,6 @@ impl ExperimentRunner {
                     .unwrap();
             }
         }
-    }
-
-    async fn run_experiment(&self, experiment: &Experiment) {
-        // todo!("Running an experiment needs to perform setup, execution, and teardown steps.");
-        match connect_to_group(&experiment.hosts()).await {
-            Ok((group, sftp)) => {
-                info!("Successfully connected to group, {group:?}, {sftp:?}");
-
-                run_remote_command_on_group::<fn(&String) -> Vec<String>>(
-                    &"echo".to_string(),
-                    &group,
-                    &Some(vec!["hello".to_string()]),
-                    None,
-                )
-                .await;
-
-                close_group_sessions(group).await;
-            }
-            Err(e) => error!("Failed to connect to group, {e}"),
-        }
-
-        todo!("Running an experiment needs to perform setup, execution, and teardown steps.");
-        // tokio::time::sleep(Duration::from_millis(2000)).await;
     }
 
     // An experiment is constructed from the experiment configuration.
