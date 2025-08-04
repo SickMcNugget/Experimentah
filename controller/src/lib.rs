@@ -16,6 +16,23 @@ pub const STORAGE_DIR: &str = "storage";
 /// Any subdirectories created within `/srv/experimentah` are deleted once results are retrieved.
 pub const REMOTE_DIR: &str = "/srv/experimentah";
 
+/// The results directory should be relative to both:
+/// - the variation directory: /srv/experimentah/<timestamp>/<repeat>/results
+/// - the controller storage directory: storage/results
+pub const RESULTS_DIR: &str = "results";
+
+/// We need a way to determine if any exporters are currently running on our remote machines
+/// (meaning that they were launched by Experimentah in either the current session or a previous
+/// one).
+///
+/// To do so, we use advisory locks inside this directory to state that the process is, in fact,
+/// currently running.
+pub const EXPORTER_DIR: &str = "/srv/experimentah/live_exporters";
+
+/// By default, we currently assume that bash is the default interpreter and that it will be
+/// available on PATH in some manner by the remote SSH user.
+pub const INTERPRETER: &str = "bash";
+
 pub mod parse;
 pub mod run;
 pub mod ssh;

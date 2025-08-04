@@ -2,7 +2,7 @@ use crate::parse::{
     generate_experiments, Config, Experiment, ExperimentConfig, ExperimentRuns,
     Exporter, Host, RemoteExecution,
 };
-use crate::REMOTE_DIR;
+use crate::{EXPORTER_DIR, REMOTE_DIR};
 
 const MAX_EXPERIMENTS: usize = 32;
 const RUN_POLL_SLEEP: Duration = Duration::from_millis(250);
@@ -197,8 +197,13 @@ impl ExperimentRunner {
             // TODO(joren): Handle error connecting case
             let sessions = ssh::connect_to_hosts(&hosts).await.unwrap();
 
-            // Ensure that our top-level directory exists
-            ssh::make_directory(&sessions, Path::new(REMOTE_DIR)).await;
+            // Ensure that our 'well-known' directories are present
+            // TODO(joren): Handle error for ssh command
+            ssh::make_directories(
+                &sessions,
+                &[Path::new(REMOTE_DIR), Path::new(EXPORTER_DIR)],
+            )
+            .await;
 
             for i in 1..=runs {
                 self.current_run.store(i, Ordering::Relaxed);
@@ -218,17 +223,12 @@ impl ExperimentRunner {
                         &experiment.hosts,
                     );
 
-                    // TODO(joren): handle the result from connecting
-                    let sessions = ssh::connect_to_hosts(&experiment.hosts())
-                        .await
-                        .unwrap();
-
                     let variation_directory =
                         PathBuf::from(format!("{REMOTE_DIR}/{ts}/{i}"));
-
-                    ssh::make_directory(&sessions, &variation_directory).await;
                     let experiment_directory =
                         variation_directory.parent().unwrap();
+
+                    ssh::make_directory(&sessions, &variation_directory).await;
 
                     Self::start_exporters(
                         &sessions,
@@ -395,7 +395,7 @@ impl ExperimentRunner {
             for setup in exporter.setup.iter() {
                 // TODO(joren): Handle shlex error
                 let setup_comm = shlex::split(&setup).unwrap();
-                ssh::run_command_at(
+                ssh::run_command_silent_at(
                     &exporter_sessions,
                     &setup_comm,
                     experiment_directory,

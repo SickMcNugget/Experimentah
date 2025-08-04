@@ -1,6 +1,6 @@
 // use futures_core::stream::Stream;
 use futures_util::StreamExt;
-use log::info;
+use log::{error, info};
 use openssh::{Error, KnownHosts, Session};
 use openssh_sftp_client::{
     fs::Dir,
@@ -14,6 +14,8 @@ use std::{fmt, io};
 use std::process::Command;
 use std::sync::Arc;
 use tokio::task::{self, JoinHandle};
+
+use crate::INTERPRETER;
 
 // Bit ugly, but we need separate maps for the normal Sessions and SFTP ones.
 type SessionMap = HashMap<String, Arc<Session>>;
@@ -48,7 +50,8 @@ pub enum SSHError {
     OutputError(String, FromUtf8Error),
     JoinError(String, task::JoinError),
     IOError(String, io::Error),
-    StateError(String)
+    StateError(String),
+    ProcessError(String, String, Option<i32>),
 }
 
 impl SSHError {
@@ -72,6 +75,24 @@ impl SSHError {
         }
         Ok(())
     }
+
+    fn display_process_error(f: &mut fmt::Formatter<'_>, message: &str, stderr: &str, code: Option<i32>) -> fmt::Result {
+        let mut msg: String = format!("{message}: ");
+
+        match code {
+            Some(code) => msg += &format!("process exited with status: {}: ", code),
+            None => msg += "process terminated by signal: ",
+        }
+
+        if !stderr.is_empty() {
+            msg += &format!("\nstderr: {stderr}")
+        }
+
+        let msg = msg.trim();
+        write!(f, "{}", msg)?;
+
+        Ok(())
+    }
 }
 
 impl fmt::Display for SSHError {
@@ -91,9 +112,12 @@ impl fmt::Display for SSHError {
             },
             Self::JoinError(ref message, ref source) => {
                 write!(f, "{message}: {source}")?;
-            }
+            },
             Self::StateError(ref message) => {
                 write!(f, "{message}")?;
+            },
+            Self::ProcessError(ref message, ref stderr, code) => {
+                Self::display_process_error(f, message, stderr, code)?;
             }
         }
 
@@ -163,6 +187,12 @@ impl From<io::Error> for SSHError {
     }
 }
 
+impl From<(String, String, Option<i32>)> for SSHError {
+    fn from(value: (String, String, Option<i32>)) -> Self {
+        Self::ProcessError(value.0, value.1, value.2)
+    }
+}
+
 #[derive(Debug, Clone)]
 struct NoTargetError;
 impl std::error::Error for NoTargetError {}
@@ -218,7 +248,7 @@ pub async fn upload(
     }
 
     for task in tasks {
-        let output = task.await?;
+        task.await?;
         // println!("{}", String::from_utf8(output.stdout).unwrap());
     }
 
@@ -233,6 +263,82 @@ pub async fn run_command_at(
     let cd_command = vec!["cd".to_string(), directory.to_string_lossy().to_string(), "&&".to_string()];
     let command_args: Vec<String> = cd_command.iter().chain(command_args).cloned().collect();
     run_command(sessions, &command_args).await
+}
+
+pub async fn run_command_silent_at(
+    sessions: &Sessions,
+    command_args: &[String],
+    directory: &Path,
+) -> Result<()> {
+    let cd_command = vec!["cd".to_string(), directory.to_string_lossy().to_string(), "&&".to_string()];
+    let command_args: Vec<String> = cd_command.iter().chain(command_args).cloned().collect();
+    run_command_silent(sessions, &command_args).await
+}
+
+pub async fn run_command_silent(
+    sessions: &Sessions,
+    command_args: &[String]
+) -> Result<()> {
+    if sessions.is_empty() {
+        Err(SSHError::StateError("No sessions were present when trying to run a command".to_string()))?;
+    } else if command_args.is_empty() {
+        Err(SSHError::StateError("No command was supplied when trying to run a command remotely".to_string()))?;
+    }
+
+    let mut tasks: Vec<JoinHandle<Result<()>>> = Vec::with_capacity(sessions.len());
+    for (host, session) in sessions.iter() {
+
+        let host_c = host.clone();
+        let session_c = session.clone();
+
+        // We assume the use of bash
+        // TODO(joren): Add "sh" downgrade functionality
+        // let interpreter = "bash";
+
+        // Since we run our command through bash, we should treat it as
+        // one single argument so that bash can do the splitting
+        // let command_c = command_args.first().unwrap().clone();
+        let command_args_c = command_args.join(" ");
+
+        tasks.push(task::spawn(async move {remote_command(session_c, &host_c, &command_args_c, |_, _|{}).await}));
+    }
+
+    // We have our JoinError and also an internal SSHError
+    for task in tasks.into_iter() {
+        task.await??;
+    }
+    Ok(())
+}
+
+/// The internal implementation for running a command remotely via SSH.
+/// This function uses a closure for separate processing of the command output.
+/// For our use case, this closure either echoes stdout, or allows silent command execution.
+async fn remote_command<F>(session: Arc<SFTPSession>, host: &String, command_args: &String, output_closure: F) -> Result<()>
+where F: FnOnce(&str, Vec<u8>) -> ()
+{
+    let program = &command_args[..command_args.find(' ').unwrap()];
+
+    let mut owned_command = session.session.command(INTERPRETER);
+    owned_command.args(&["-c", &command_args]);
+
+    let err_str = format!("Failed to run program '{program}' on host {host}");
+
+    match owned_command.output().await {
+        Ok(output) => {
+            if !output.status.success() {
+                let stderr = String::from_utf8(output.stderr).map_err(|e| {
+                    SSHError::OutputError(format!("Failed to convert stderr bytes to UTF-8 for program '{program}' on host '{host}'"), e)
+                })?;
+                Err((err_str, stderr, output.status.code()))?;
+            }
+
+            output_closure(host, output.stdout);
+        },
+        Err(e) => {
+            Err((err_str, e))?;
+        }
+    }
+    Ok(())
 }
 
 pub async fn run_command(
@@ -253,41 +359,22 @@ pub async fn run_command(
 
         // We assume the use of bash
         // TODO(joren): Add "sh" downgrade functionality
-        let interpreter = "bash";
-        // let command_c = command_args.first().unwrap().clone();
-        // let args_c = command_args[1..].to_vec();
+        
         // Since we run our command through bash, we should treat it as
         // one single argument so that bash can do the splitting
         let command_c = command_args.first().unwrap().clone();
         let command_args_c = command_args.join(" ");
 
-        tasks.push(task::spawn(async move {
-            let mut s_command = session_c.session.command(interpreter);
-            s_command.arg("-c");
+        // Decide whether this string handling should work with results
+        tasks.push(task::spawn(async move {remote_command(session_c, &host_c, &command_args_c, |host, stdout|{
+            let stdout = String::from_utf8(stdout).map_err(|e| {
+                SSHError::OutputError(format!("Failed to convert stdout bytes to UTF-8 for command '{command_c}' on host '{host_c}'"), e)
+            }).unwrap();
 
-            // let mut s_command = session_c.session.command(&command_c);
-            s_command.arg(&command_args_c);
-
-            match s_command.output().await {
-                Ok(output) => {
-                    // format!("Failed to convert output for command '{command_c}' on host '{host_c}' to string.").as_str()
-                    let stdout = String::from_utf8(output.stdout).map_err(|e| {
-                        SSHError::OutputError(format!("Failed to convert stdout bytes to UTF-8 for command '{command_c}' on host '{host_c}'"), e)
-                    })?;
-                    let stderr = String::from_utf8(output.stderr).map_err(|e| {
-                        SSHError::OutputError(format!("Failed to convert stderr bytes to UTF-8 for command '{command_c}' on host '{host_c}'"), e)
-                    })?;
-
-                    println!("'{host_c}'\nstdout\n{stdout}\nstderr\n{stderr}");
-                }
-                Err(e) => {
-                    Err((format!("Failed to run command '{command_args_c}' on host {host_c}"),e))?;
-                    // handle_openssh_error(&e);
-                    // panic!("Failed to run command {:?} on host {host_c}", std::iter::once(&command_c).chain(&args_c).collect::<Vec<&String>>());
-                }
-            };
-            Ok(())
-        }));
+            if !stdout.is_empty() {
+                print!("Stdout for command '{command_c}' on {host}\n{stdout}");
+            }
+        }).await}));
     }
 
     // We have our JoinError and also an internal SSHError
@@ -297,6 +384,16 @@ pub async fn run_command(
     Ok(())
 }
 
+/// Makes multiple directories at once in parallel across the sessions passed in.
+/// This means if 8 directories need to be made on 3 hosts,
+/// all 3 hosts will run the 'mkdir -p <directory>*8' command in parallel.
+pub async fn make_directories(sessions: &Sessions, paths: &[&Path]) -> Result<()> {
+    let paths: Vec<String> = paths.iter().map(|path| path.to_string_lossy().to_string()).collect();
+    let command: Vec<String> = vec!["mkdir".to_string(), "-p".to_string()].into_iter().chain(paths).collect();
+
+    run_command(sessions, &command).await
+}
+
 pub async fn make_directory(sessions: &Sessions, path: &Path) -> Result<()> {
     let path = path.to_string_lossy();
         run_command(
@@ -304,16 +401,6 @@ pub async fn make_directory(sessions: &Sessions, path: &Path) -> Result<()> {
             &["mkdir".into(), "-p".into(), path.to_string()],
         )
         .await
-}
-
-fn handle_openssh_error(e: &openssh::Error) {
-    match e {
-        openssh::Error::Remote(remote_e) => {
-            eprintln!("Error on remote occurred during SSH - {}: {e}", remote_e.kind());
-        },
-        _ => eprintln!("{e}")
-    }
-
 }
 
 /// Note that the script in question is run remotely,
