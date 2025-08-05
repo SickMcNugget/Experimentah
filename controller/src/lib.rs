@@ -1,5 +1,10 @@
 use std::time::{Duration, SystemTime, SystemTimeError, UNIX_EPOCH};
 
+pub mod db;
+pub mod parse;
+pub mod run;
+pub mod ssh;
+
 /// We put all our files (results, setup scripts, execution scripts, teardown scripts) beneath this
 /// subdirectory.
 /// Some important subdirectories are:
@@ -8,6 +13,8 @@ use std::time::{Duration, SystemTime, SystemTimeError, UNIX_EPOCH};
 /// - storage/execute - Contains execute scripts
 /// - storage/results - Contains collected results
 /// - storage/exporters - Contains exporter binaries
+/// Some important files are:
+/// - storage/<DATABASE>
 pub const STORAGE_DIR: &str = "storage";
 
 /// We want all our remote operations to occur in a well-known directory, so that we can avoid.
@@ -35,10 +42,20 @@ pub const EXPORTER_DIR: &str = "/srv/experimentah/live_exporters";
 /// available on PATH in some manner by the remote SSH user.
 pub const INTERPRETER: &str = "bash";
 
+/// The philosophy of Experimentah is to do everything in *files*, to remove the complexity of
+/// using databases everywhere.
+///
+/// However, it is important that we use a database for error recovery. It's really easy to just
+/// query a database for what you were doing when you last ran the program, and we get some atomic
+/// guarantees that could be nice if we ever want to support running multiple experiments
+/// simultaneously.
+///
+/// This will *NEVER* be used to store the outputs of experiments, as we want the filesystem to do
+/// the heavy lifting here.
+///
+/// The database file should be relative to the STORAGE_DIR
+pub const DATABASE_NAME: &str = "experimentah";
+
 fn time_since_epoch() -> Result<Duration, SystemTimeError> {
     SystemTime::now().duration_since(UNIX_EPOCH)
 }
-
-pub mod parse;
-pub mod run;
-pub mod ssh;

@@ -601,15 +601,11 @@ impl RemoteExecutionConfig {
         Ok(commands)
     }
 
-    pub fn validate(
-        &self,
-        config: &Config,
-        experiment_name: &str,
-    ) -> Result<()> {
+    fn validate(&self, config: &Config, experiment_name: &str) -> Result<()> {
         hosts_check(&config.hosts, &self.hosts, experiment_name)
     }
 
-    pub fn validate_files(
+    fn validate_files(
         &self,
         remote_execution_type: &RemoteExecutionType,
     ) -> Result<()> {
