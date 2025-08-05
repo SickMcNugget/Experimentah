@@ -1,26 +1,21 @@
 use crate::parse::{
-    generate_experiments, Config, Experiment, ExperimentConfig, ExperimentRuns,
-    Exporter, Host, RemoteExecution,
+    Experiment, ExperimentRuns, Exporter, Host, RemoteExecution,
 };
-use crate::{EXPORTER_DIR, REMOTE_DIR};
+use crate::{time_since_epoch, EXPORTER_DIR, REMOTE_DIR};
 
 const MAX_EXPERIMENTS: usize = 32;
 const RUN_POLL_SLEEP: Duration = Duration::from_millis(250);
 
 use std::collections::VecDeque;
-use std::path::{self, PathBuf};
+use std::path::PathBuf;
 // use reqwest::Client;
 use log::{error, info};
-use std::process::{Child, Command};
+use std::path::Path;
 use std::sync::atomic::{AtomicU16, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use std::{collections::HashSet, path::Path};
+use std::time::Duration;
 use tokio::sync::Mutex;
 
-use crate::ssh::{
-    self, close_group_sessions, connect_to_group, run_remote_command_on_group,
-    Sessions,
-};
+use crate::ssh::{self, Sessions};
 
 type Result<T> = std::result::Result<T, RuntimeError>;
 
@@ -30,6 +25,7 @@ pub enum RuntimeError {
     // I know, it's hilarious
     // BadStatusCode(String, reqwest::StatusCode),
     IOError(String, std::io::Error),
+    TimeError(String, std::time::SystemTimeError),
     Generic(String),
 }
 
@@ -45,6 +41,9 @@ impl std::fmt::Display for RuntimeError {
             RuntimeError::IOError(ref message, ref source) => {
                 write!(f, "{message}: {source}")
             }
+            RuntimeError::TimeError(ref message, ref source) => {
+                write!(f, "{message}: {source}")
+            }
             RuntimeError::Generic(ref message) => {
                 write!(f, "{message}")
             }
@@ -57,6 +56,7 @@ impl std::error::Error for RuntimeError {
         match *self {
             // RuntimeError::ReqwestError(.., ref source) => Some(source),
             RuntimeError::IOError(.., ref source) => Some(source),
+            RuntimeError::TimeError(.., ref source) => Some(source),
             // RuntimeError::BadStatusCode(..) => None,
             RuntimeError::Generic(..) => None,
         }
@@ -87,6 +87,12 @@ impl From<(String, std::io::Error)> for RuntimeError {
     }
 }
 
+impl From<std::time::SystemTimeError> for RuntimeError {
+    fn from(value: std::time::SystemTimeError) -> Self {
+        RuntimeError::TimeError("System Time error".to_string(), value)
+    }
+}
+
 impl From<ssh::SSHError> for RuntimeError {
     fn from(value: ssh::SSHError) -> Self {
         RuntimeError::Generic(value.to_string())
@@ -111,29 +117,26 @@ impl From<&str> for RuntimeError {
     }
 }
 
-#[allow(dead_code)]
-struct ChildProcess {
-    address: String,
-    child: Child,
-}
+// struct ChildProcess {
+//     address: String,
+//     child: Child,
+// }
+//
+// impl ChildProcess {
+//     fn new(address: String, child: Child) -> Self {
+//         Self { address, child }
+//     }
+// }
 
-impl ChildProcess {
-    fn new(address: String, child: Child) -> Self {
-        Self { address, child }
-    }
-}
+type ExperimentQueue = Mutex<VecDeque<ExperimentRuns>>;
 
 // The ExperimentRunner should only be used AFTER parsing has been completed!
 pub struct ExperimentRunner {
-    // The experiment runner should be fed by a channel of work.
-    // It will keep track of what it's currently doing.
-    /// If current_experiment is None, then no work is being done.
-    // We want a reference to the currently running experiment
     pub current_experiment: Mutex<Option<String>>,
     /// Runs start from 1. 0 Means that nothing is being worked on.
     pub current_runs: AtomicU16,
     pub current_run: AtomicU16,
-    pub experiments_queue: Mutex<VecDeque<ExperimentRuns>>,
+    pub experiment_queue: ExperimentQueue,
 }
 
 impl Default for ExperimentRunner {
@@ -142,7 +145,7 @@ impl Default for ExperimentRunner {
             current_experiment: Mutex::new(None),
             current_runs: 0.into(),
             current_run: 0.into(),
-            experiments_queue: Mutex::new(VecDeque::with_capacity(
+            experiment_queue: Mutex::new(VecDeque::with_capacity(
                 MAX_EXPERIMENTS,
             )),
         }
@@ -156,35 +159,65 @@ impl ExperimentRunner {
 
     /// Add a new experiment to the runner
     pub async fn enqueue(&self, experiments: ExperimentRuns) {
-        self.experiments_queue.lock().await.push_back(experiments);
+        self.experiment_queue.lock().await.push_back(experiments);
     }
 
-    /// Begin the runner main loop. When experiments are enqueued,
-    /// and no work is currently being done, the runner begins work
-    /// on the experiment.
+    async fn wait_for_experiments(&self) -> ExperimentRuns {
+        loop {
+            let mut queue = self.experiment_queue.lock().await;
+            match queue.pop_front() {
+                Some(experiment_runs) => {
+                    self.current_runs
+                        .store(experiment_runs.0, Ordering::Relaxed);
+                    return experiment_runs;
+                }
+                None => tokio::time::sleep(RUN_POLL_SLEEP).await,
+            }
+        }
+    }
+
+    async fn reset_metadata(&self) {
+        self.current_runs.store(0, Ordering::Relaxed);
+        self.current_run.store(0, Ordering::Relaxed);
+        *self.current_experiment.lock().await = None;
+    }
+
+    async fn update_current_experiment(
+        &self,
+        experiment: &Experiment,
+        run: u16,
+    ) {
+        info!(
+            "Running experiment '{}' (repeat {}/{})...",
+            &experiment.name,
+            run,
+            self.current_runs.load(Ordering::Relaxed)
+        );
+        let mut current_experiment = self.current_experiment.lock().await;
+        *current_experiment = Some(experiment.name.clone());
+    }
+
+    /// I really have no idea what I want to do for the ExperimentRunner main loop.
+    /// Up until this point, start has been both the entry point and the houses the entire loop
+    /// for ExperimentRunner. I have a feeling that separating the main loop from a user trying
+    /// to start the main loop will make error handling easier, but I'm just unsure overall as
+    /// to what the state of this struct needs to be for 1.0.
+    /// - Joren
     pub async fn start(&self) {
         info!("Experiment runner now running..");
         loop {
-            let (runs, experiments) = {
-                let mut queue = self.experiments_queue.lock().await;
-                if !queue.is_empty() {
-                    queue.pop_front().unwrap()
-                } else {
-                    tokio::time::sleep(RUN_POLL_SLEEP).await;
-                    continue;
-                }
-            };
+            if let Err(e) = self.main_loop().await {
+                error!("{e}");
+            }
+        }
+    }
+
+    async fn main_loop(&self) -> Result<()> {
+        loop {
+            let (runs, experiments) = self.wait_for_experiments().await;
 
             // We create the timestamp once for each full experiment
-            // TODO(joren): Think about what you want to do with errors.
-            // It might be worth having an endpoint that can retrieve errors.
-            let ts = match SystemTime::now().duration_since(UNIX_EPOCH) {
-                Ok(ts) => ts.as_millis(),
-                Err(e) => {
-                    error!("Error getting the time since epoch: {e}");
-                    continue;
-                }
-            };
+            let ts = time_since_epoch()?.as_millis();
 
             info!(
                 "Experiment with {} variations received ({} repeats).",
@@ -192,57 +225,48 @@ impl ExperimentRunner {
                 runs
             );
 
-            self.current_runs.store(runs, Ordering::Relaxed);
             let hosts = Self::unique_hosts_for_all_experiments(&experiments);
-            // TODO(joren): Handle error connecting case
-            let sessions = ssh::connect_to_hosts(&hosts).await.unwrap();
+            let sessions = ssh::connect_to_hosts(&hosts).await?;
 
             // Ensure that our 'well-known' directories are present
-            // TODO(joren): Handle error for ssh command
             ssh::make_directories(
                 &sessions,
                 &[Path::new(REMOTE_DIR), Path::new(EXPORTER_DIR)],
             )
-            .await;
+            .await?;
 
-            for i in 1..=runs {
-                self.current_run.store(i, Ordering::Relaxed);
+            for run in 1..=runs {
+                self.current_run.store(run, Ordering::Relaxed);
+
                 for experiment in experiments.iter() {
-                    {
-                        info!(
-                            "Running experiment \"{}\" (repeat {}/{})...",
-                            &experiment.name, i, runs
-                        );
-                        let mut current_experiment =
-                            self.current_experiment.lock().await;
-                        *current_experiment = Some(experiment.name.clone());
-                    }
+                    self.update_current_experiment(experiment, run).await;
 
-                    let variation_sessions = Self::filter_host_sessions(
-                        &sessions,
-                        &experiment.hosts,
-                    );
+                    // let variation_sessions = Self::filter_host_sessions(
+                    //     &sessions,
+                    //     &experiment.hosts,
+                    // );
 
                     let variation_directory =
-                        PathBuf::from(format!("{REMOTE_DIR}/{ts}/{i}"));
+                        PathBuf::from(format!("{REMOTE_DIR}/{ts}/{run}"));
                     let experiment_directory =
                         variation_directory.parent().unwrap();
 
-                    ssh::make_directory(&sessions, &variation_directory).await;
+                    ssh::make_directory(&sessions, &variation_directory)
+                        .await?;
 
                     Self::start_exporters(
                         &sessions,
                         &experiment.exporters,
                         experiment_directory,
                     )
-                    .await;
+                    .await?;
 
                     Self::run_remote_execution(
                         &sessions,
                         &experiment.setup,
                         experiment_directory,
                     )
-                    .await;
+                    .await?;
 
                     // ssh::upload(&sessions, source_path, destination_path)
 
@@ -252,106 +276,18 @@ impl ExperimentRunner {
                         &experiment.teardown,
                         experiment_directory,
                     )
-                    .await;
-
-                    // for setup in experiment.setup.iter() {
-                    //     let setup_sessions: Sessions = sessions
-                    //         .iter()
-                    //         .filter(|(key, _)| {
-                    //             setup
-                    //                 .runners
-                    //                 .iter()
-                    //                 .any(|runner| &runner.address == *key)
-                    //         })
-                    //         .map(|(key, value)| (key.clone(), value.clone()))
-                    //         .collect();
-                    //
-                    //     for script in setup.scripts.iter() {
-                    //         // TODO(joren): handle the canonicalisation error
-                    //         let script_path = script.canonicalize().unwrap();
-                    //         //TODO(joren): Handle error case
-                    //         ssh::upload(
-                    //             &setup_sessions,
-                    //             &script_path,
-                    //             experiment_directory,
-                    //         )
-                    //         .await
-                    //         .unwrap();
-                    //         // TODO(joren): Handle error case
-                    //         let remote_script = experiment_directory
-                    //             .join(script.file_name().unwrap());
-                    //         ssh::run_script(&setup_sessions, &remote_script)
-                    //             .await
-                    //             .unwrap();
-                    //     }
-                    // }
-                    //
-                    // for teardown in experiment.teardown.iter() {
-                    //     let teardown_sessions: Sessions = sessions
-                    //         .iter()
-                    //         .filter(|(key, _)| {
-                    //             teardown
-                    //                 .runners
-                    //                 .iter()
-                    //                 .any(|runner| &runner.address == *key)
-                    //         })
-                    //         .map(|(key, value)| (key.clone(), value.clone()))
-                    //         .collect();
-                    //
-                    //     println!(
-                    //         "teardown sessions: {}",
-                    //         teardown_sessions.len()
-                    //     );
-                    //
-                    //     for script in teardown.scripts.iter() {
-                    //         // TODO(joren): handle the canonicalisation error
-                    //         let script_path = script.canonicalize().unwrap();
-                    //         //TODO(joren): Handle error case
-                    //         ssh::upload(
-                    //             &teardown_sessions,
-                    //             &script_path,
-                    //             experiment_directory,
-                    //         )
-                    //         .await
-                    //         .unwrap();
-                    //         // TODO(joren): Handle error case
-                    //         let remote_script = experiment_directory
-                    //             .join(script.file_name().unwrap());
-                    //         ssh::run_script(&teardown_sessions, &remote_script)
-                    //             .await
-                    //             .unwrap();
-                    //     }
-                    // }
-
-                    // let command_args = vec!["cd".to_string(), ".ssh".into()];
-                    // ssh::run_command_on_sessions(&sessions, &command_args)
-                    //     .await
-                    //     .unwrap();
-                    //
-                    // let command_args = vec!["ls".to_string(), "-al".into()];
-                    // // TODO(joren): handle the result from running commands
-                    // ssh::run_command_on_sessions(&sessions, &command_args)
-                    //     .await
-                    //     .unwrap();
-
-                    // let connections =
-                    //     Experiment::connect_to_hosts(experiment.hosts())
-                    // self.run_experiment();
-
-                    // self.run_experiment(experiment).await;
+                    .await?;
                 }
             }
             info!("Finished experiments");
 
-            self.current_runs.store(0, Ordering::Relaxed);
-            self.current_run.store(0, Ordering::Relaxed);
-            *self.current_experiment.lock().await = None;
+            self.reset_metadata().await;
         }
     }
 
     fn filter_sessions(sessions: &Sessions, addresses: &[String]) -> Sessions {
         sessions
-            .into_iter()
+            .iter()
             .filter(|(key, _)| addresses.contains(key))
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect()
@@ -385,7 +321,7 @@ impl ExperimentRunner {
 
     async fn start_exporters(
         sessions: &Sessions,
-        exporters: &Vec<Exporter>,
+        exporters: &[Exporter],
         experiment_directory: &Path,
     ) -> Result<()> {
         for exporter in exporters.iter() {
@@ -394,7 +330,7 @@ impl ExperimentRunner {
 
             for setup in exporter.setup.iter() {
                 // TODO(joren): Handle shlex error
-                let setup_comm = shlex::split(&setup).unwrap();
+                let setup_comm = shlex::split(setup).unwrap();
                 ssh::run_command_silent_at(
                     &exporter_sessions,
                     &setup_comm,
@@ -409,6 +345,15 @@ impl ExperimentRunner {
             // The exporter needs a file to be created which we can refer to in the event
             // of an experimentah crash.
             // We can make use of the flock command when running our exporters
+            // match ssh::run_background_command(&exporter_sessions, &comm).await {
+            //     Ok(child) => info!("Started exporter '{}'", exporter.name),
+            //     Err(e) => {
+            //         error!(
+            //             "Failed to start exporter '{}': {}",
+            //             exporter.name, e
+            //         )
+            //     }
+            // }
             match ssh::run_command(&exporter_sessions, &comm).await {
                 Ok(()) => info!("Started exporter '{}'", exporter.name),
                 Err(e) => {
@@ -425,44 +370,25 @@ impl ExperimentRunner {
 
     async fn run_remote_execution(
         sessions: &Sessions,
-        re: &Vec<RemoteExecution>,
+        re: &[RemoteExecution],
         experiment_directory: &Path,
-    ) {
-        for stage in re.into_iter() {
+    ) -> Result<()> {
+        for stage in re.iter() {
             let setup_sessions =
                 Self::filter_host_sessions(sessions, &stage.hosts);
             for script in stage.scripts.iter() {
                 assert!(script.exists());
 
-                //TODO(joren): Handle error case
-                ssh::upload(&setup_sessions, &script, experiment_directory)
-                    .await
-                    .unwrap();
+                ssh::upload(&setup_sessions, script, experiment_directory)
+                    .await?;
 
                 // TODO(joren): Handle error case
                 let remote_script =
                     experiment_directory.join(script.file_name().unwrap());
-                ssh::run_script(&setup_sessions, &remote_script)
-                    .await
-                    .unwrap();
+                ssh::run_script(&setup_sessions, &remote_script).await?;
             }
         }
-    }
-
-    // An experiment is constructed from the experiment configuration.
-    // It's easier to construct it with a function because there isn't a one-to-one
-    // mapping from an experiment variation to an experiment. There's an override system
-    // that makes creating experiments easier on the user end. We handle all the cases
-    // starting from this function.
-
-    fn unique_hosts(experiments: &[Experiment]) -> HashSet<&Host> {
-        let mut unique_hosts = HashSet::new();
-        for experiment in experiments.iter() {
-            for host in experiment.hosts.iter() {
-                unique_hosts.insert(host);
-            }
-        }
-        unique_hosts
+        Ok(())
     }
 }
 
@@ -818,7 +744,7 @@ fn get_time() -> String {
 mod tests {
     // use std::{path::PathBuf, str::FromStr, time::Duration};
     //
-    use super::*;
+    // use super::*;
 
     // fn
 

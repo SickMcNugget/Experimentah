@@ -1,3 +1,5 @@
+use std::time::{Duration, SystemTime, SystemTimeError, UNIX_EPOCH};
+
 /// We put all our files (results, setup scripts, execution scripts, teardown scripts) beneath this
 /// subdirectory.
 /// Some important subdirectories are:
@@ -32,6 +34,10 @@ pub const EXPORTER_DIR: &str = "/srv/experimentah/live_exporters";
 /// By default, we currently assume that bash is the default interpreter and that it will be
 /// available on PATH in some manner by the remote SSH user.
 pub const INTERPRETER: &str = "bash";
+
+fn time_since_epoch() -> Result<Duration, SystemTimeError> {
+    SystemTime::now().duration_since(UNIX_EPOCH)
+}
 
 pub mod parse;
 pub mod run;

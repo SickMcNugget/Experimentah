@@ -1,5 +1,5 @@
 [workspace]
-members = ["controller", "ssh_utils", "cli"]
+members = ["controller", "cli"]
 resolver = "2"
 
 [workspace.package]

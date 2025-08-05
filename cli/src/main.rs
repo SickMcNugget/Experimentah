@@ -10,26 +10,20 @@
 //  b. Tries to upload collected results (if the error was with repo node)
 //  c. Dies
 
-use core::fmt;
-use std::collections::HashMap;
 use std::env;
-use std::error::Error;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use clap::{Args, Parser};
 
 use controller::parse::{Config, ExperimentConfig};
-use controller::run::ExperimentRunner;
 
 use reqwest::blocking::{multipart, Client};
-use reqwest::StatusCode;
 
 use std::time::Duration;
 
 use cli::CliError;
 
-const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(5000);
+// const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(5000);
 
 fn arg_or_error<'a, T>(
     arg: &'a Option<T>,
@@ -135,7 +129,7 @@ fn validate_configs(
 
     // We've guaranteed a config is present.
     let config = config.as_ref().unwrap();
-    match Config::from_file(&config) {
+    match Config::from_file(config) {
         Ok(config) => match config.validate() {
             Ok(_) => {
                 println!("Config is valid");
@@ -179,10 +173,8 @@ fn validate_configs(
 
 /// We make a few assumptions regarding uploaded files for ease-of-use
 /// on the part of the user.
-/// 1. If a file contains setup/teardown, then it is probably a setup/teardown
-/// script.
-/// 2. If they do not pass in a type (setup/teardown/execute), it will be treated
-/// as an execution script
+///     1. If a file contains setup/teardown, then it is probably a setup/teardown script.
+///     2. If they do not pass in a type (setup/teardown/execute), it will be treated as an execution script.
 fn parse_upload(s: &str) -> Result<(PathBuf, String), String> {
     let s = s.trim().replace("  ", " ");
     let parts: Vec<&str> = s.splitn(2, " ").collect();
@@ -227,7 +219,7 @@ fn parse_upload(s: &str) -> Result<(PathBuf, String), String> {
             panic!("We should not have received a parts vector with more than 2 members");
         }
     }
-    return Ok((filepath, filetype));
+    Ok((filepath, filetype))
 }
 
 fn upload_data(
@@ -348,8 +340,7 @@ fn default_log_file() -> PathBuf {
 }
 
 fn default_working_directory() -> PathBuf {
-    let mut path = env::current_dir().unwrap();
-    path
+    env::current_dir().unwrap()
 }
 
 #[derive(Parser, Debug)]

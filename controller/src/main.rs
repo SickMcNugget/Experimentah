@@ -161,7 +161,7 @@ async fn upload(mut multipart: Multipart) -> Result<(), String> {
                 }
             },
             "file" => {
-                path.push(field.file_name().unwrap().to_string());
+                path.push(field.file_name().unwrap());
                 file = Some(field.bytes().await.unwrap());
             }
             _ => {

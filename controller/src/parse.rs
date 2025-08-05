@@ -1,7 +1,7 @@
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use log::error;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fmt::Display;
 use std::path::{Path, PathBuf};
@@ -233,19 +233,6 @@ pub struct BrainConfig {
     pub port: u16,
 }
 
-impl BrainConfig {
-    fn validate(&self, hosts: &[HostConfig]) -> Result<()> {
-        // Check the host exists
-        hosts.iter().find(|host| host.name == self.host).ok_or(
-            ParseError::ValidationError(format!(
-                "The host for [brain] must be defined: {}",
-                self.host
-            )),
-        )?;
-        Ok(())
-    }
-}
-
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
 pub struct HostConfig {
     pub name: String,
@@ -403,9 +390,10 @@ impl ExperimentConfig {
 
     pub fn validate(&self, config: &Config) -> Result<()> {
         if self.execute.clone().into_os_string().is_empty() {
-            Err(ParseError::ValidationError(format!(
+            Err(ParseError::ValidationError(
                 "The 'execute' field in an experiment config cannot be empty"
-            )))?;
+                    .to_string(),
+            ))?;
         }
 
         // TODO(joren): Return this check
@@ -767,11 +755,11 @@ fn map_exporters(config: &Config, exporters: &[String]) -> Vec<Exporter> {
         .collect()
 }
 
-fn remap_execute(execute: &PathBuf) -> Result<PathBuf> {
+fn remap_execute(execute: &Path) -> Result<PathBuf> {
     //TODO(joren): handle filename unwrap error
     let basename = execute.file_name().unwrap();
     let path = PathBuf::from(format!("{STORAGE_DIR}/execute")).join(basename);
-    std::path::absolute(path).map_err(|e| ParseError::from(e))
+    std::path::absolute(path).map_err(ParseError::from)
 }
 
 fn map_remote_executions(
@@ -803,8 +791,7 @@ fn map_remote_executions(
             let basename = script.file_name().unwrap();
             let new_path = PathBuf::from(format!(
                 "{}/{}",
-                STORAGE_DIR,
-                remote_execution_type.to_string()
+                STORAGE_DIR, remote_execution_type
             ))
             .join(basename);
             mapped_scripts.push(std::path::absolute(new_path)?);
@@ -874,7 +861,7 @@ pub fn generate_experiments(
             )?,
             hosts: map_hosts(config, hosts),
             execute: remap_execute(execute)?,
-            expected_arguments: expected_arguments,
+            expected_arguments,
             arguments: arguments.clone(),
             exporters: map_exporters(config, exporters),
         });
@@ -912,8 +899,6 @@ mod tests {
     const TEST_PATH: &str = "test";
     const VALID_CONFIG: &str = "valid_config.toml";
     const VALID_EXPERIMENT_CONFIG: &str = "valid_experiment_config.toml";
-    const INVALID_CONFIG: &str = "invalid_config.toml";
-    const INVALID_EXPERIMENT_CONFIG: &str = "invalid_experiment_config.toml";
 
     fn test_path() -> PathBuf {
         PathBuf::from_str(TEST_PATH).expect("Failed to parse test_path")
