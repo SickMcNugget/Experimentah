@@ -132,6 +132,7 @@ async fn run(
 
     config.validate()?;
     experiment_config.validate(&config)?;
+    experiment_config.validate_files()?;
     info!("Successfully validated configs");
 
     let experiments = parse::generate_experiments(&config, &experiment_config)?;

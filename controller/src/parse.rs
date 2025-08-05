@@ -388,6 +388,52 @@ impl ExperimentConfig {
         Ok(())
     }
 
+    pub fn validate_files(&self) -> Result<()> {
+        check_file_exists(&remap_execute(&self.execute)?).map_err(|e| {
+            ParseError::from((
+                format!("Missing files for experiment '{}'", self.name),
+                e,
+            ))
+        })?;
+
+        for setup in self.setup.iter() {
+            setup
+                .validate_files(&RemoteExecutionType::Setup)
+                .map_err(|e| {
+                    ParseError::from((
+                        format!(
+                            "Missing files in setup for experiment '{}'",
+                            &self.name
+                        ),
+                        e,
+                    ))
+                })?;
+        }
+
+        for teardown in self.teardown.iter() {
+            teardown
+                .validate_files(&RemoteExecutionType::Teardown)
+                .map_err(|e| {
+                    ParseError::from((
+                        format!(
+                            "Missing files in teardown for experiment '{}'",
+                            &self.name
+                        ),
+                        e,
+                    ))
+                })?;
+        }
+
+        Ok(())
+    }
+
+    /// Validates all members of an ExperimentConfig.
+    /// This cross-references with the Config passed in, to ensure that there
+    /// is consistency between both of the files.
+    /// Note that this function cannot check whether files exist on disk,
+    /// and the validate_files function should be used instead for this functionality.
+    /// Clients shouldn't worry about validating files in general, as they need to be uploaded to
+    /// the controller, which will check for files
     pub fn validate(&self, config: &Config) -> Result<()> {
         if self.execute.clone().into_os_string().is_empty() {
             Err(ParseError::ValidationError(
@@ -395,14 +441,6 @@ impl ExperimentConfig {
                     .to_string(),
             ))?;
         }
-
-        // TODO(joren): Return this check
-        // check_file_exists(&self.execute).map_err(|e| {
-        //     ParseError::from((
-        //         format!("Missing files for experiment '{}'", self.name),
-        //         e,
-        //     ))
-        // })?;
 
         for setup in self.setup.iter() {
             setup.validate(config, &self.name).map_err(|e| {
@@ -447,13 +485,6 @@ impl ExperimentConfig {
                     self.name
                 )));
             }
-
-            // if self.runners.is_empty() && variation.runners.is_empty() {
-            //     return Err(ParseError::ValidationError(format!(
-            //         "No runners have been defined for experiment '{}'",
-            //         self.name
-            //     )));
-            // }
         }
 
         for teardown in self.teardown.iter() {
@@ -575,12 +606,25 @@ impl RemoteExecutionConfig {
         config: &Config,
         experiment_name: &str,
     ) -> Result<()> {
-        hosts_check(&config.hosts, &self.hosts, experiment_name)?;
-        // TODO(joren): Return this check
-        // check_files_exist(&self.scripts).map_err(|e| {
-        //     ParseError::from(("Missing files for setup/teardown", e))
-        // })?;
-        Ok(())
+        hosts_check(&config.hosts, &self.hosts, experiment_name)
+    }
+
+    pub fn validate_files(
+        &self,
+        remote_execution_type: &RemoteExecutionType,
+    ) -> Result<()> {
+        let scripts =
+            map_remote_execution_scripts(self, remote_execution_type)?;
+
+        check_files_exist(&scripts).map_err(|e| {
+            ParseError::from((
+                format!(
+                    "Missing files for {}",
+                    remote_execution_type.to_string()
+                ),
+                e,
+            ))
+        })
     }
 }
 
@@ -783,23 +827,35 @@ fn map_remote_executions(
             }
         }
 
-        //TODO(joren): Handle filename unwrap error
-        let mut mapped_scripts: Vec<PathBuf> =
-            Vec::with_capacity(remote_execution.scripts.len());
+        let mapped_scripts = map_remote_execution_scripts(
+            remote_execution,
+            &remote_execution_type,
+        )?;
 
-        for script in remote_execution.scripts.iter() {
-            let basename = script.file_name().unwrap();
-            let new_path = PathBuf::from(format!(
-                "{}/{}",
-                STORAGE_DIR, remote_execution_type
-            ))
-            .join(basename);
-            mapped_scripts.push(std::path::absolute(new_path)?);
-        }
         mapped_remote_executions
             .push(RemoteExecution::new(mapped_hosts, mapped_scripts));
     }
     Ok(mapped_remote_executions)
+}
+
+fn map_remote_execution_scripts(
+    remote_execution: &RemoteExecutionConfig,
+    remote_execution_type: &RemoteExecutionType,
+) -> Result<Vec<PathBuf>> {
+    let mut mapped_scripts: Vec<PathBuf> =
+        Vec::with_capacity(remote_execution.scripts.len());
+
+    for script in remote_execution.scripts.iter() {
+        let basename = script.file_name().expect(
+            format!("The script {:?} should have had a filename", script)
+                .as_str(),
+        );
+        let new_path =
+            PathBuf::from(format!("{STORAGE_DIR}/{remote_execution_type}"))
+                .join(basename);
+        mapped_scripts.push(std::path::absolute(new_path)?);
+    }
+    Ok(mapped_scripts)
 }
 
 pub type ExperimentRuns = (u16, Vec<Experiment>);
