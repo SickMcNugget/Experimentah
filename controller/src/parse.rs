@@ -389,7 +389,11 @@ impl ExperimentConfig {
     }
 
     pub fn validate_files(&self) -> Result<()> {
-        check_file_exists(&remap_execute(&self.execute)?).map_err(|e| {
+        check_file_exists(&map_remote_execution_script(
+            &self.execute,
+            &RemoteExecutionType::Execute,
+        )?)
+        .map_err(|e| {
             ParseError::from((
                 format!("Missing files for experiment '{}'", self.name),
                 e,
@@ -633,7 +637,9 @@ pub struct Experiment {
     pub setup: Vec<RemoteExecution>,
     pub teardown: Vec<RemoteExecution>,
     pub hosts: Vec<Host>,
-    pub execute: PathBuf,
+    // Note that execute should only contain 1 script.
+    // We make it a RemoteExecution for convenience, though
+    pub execute: RemoteExecution,
     pub arguments: Vec<String>,
     pub expected_arguments: Option<usize>,
     pub exporters: Vec<Exporter>,
@@ -739,9 +745,16 @@ pub struct RemoteExecution {
     pub scripts: Vec<PathBuf>,
 }
 
+impl RemoteExecution {
+    fn new(hosts: Vec<Host>, scripts: Vec<PathBuf>) -> Self {
+        Self { hosts, scripts }
+    }
+}
+
 enum RemoteExecutionType {
     Setup,
     Teardown,
+    Execute,
 }
 
 impl Display for RemoteExecutionType {
@@ -749,13 +762,24 @@ impl Display for RemoteExecutionType {
         match *self {
             Self::Setup => write!(f, "setup"),
             Self::Teardown => write!(f, "teardown"),
+            Self::Execute => write!(f, "execute"),
         }
     }
 }
 
-impl RemoteExecution {
-    fn new(hosts: Vec<Host>, scripts: Vec<PathBuf>) -> Self {
-        Self { hosts, scripts }
+impl FromStr for RemoteExecutionType {
+    type Err = ParseError;
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        let re_type = match s {
+            "setup" => Self::Setup,
+            "teardown" => Self::Teardown,
+            "execute" => Self::Execute,
+            &_ => Err(ParseError::ValidationError(format!(
+                "Invalid remote execution type, got {s}"
+            )))?,
+        };
+
+        Ok(re_type)
     }
 }
 
@@ -795,11 +819,20 @@ fn map_exporters(config: &Config, exporters: &[String]) -> Vec<Exporter> {
         .collect()
 }
 
-fn remap_execute(execute: &Path) -> Result<PathBuf> {
-    //TODO(joren): handle filename unwrap error
-    let basename = execute.file_name().unwrap();
-    let path = PathBuf::from(format!("{STORAGE_DIR}/execute")).join(basename);
-    std::path::absolute(path).map_err(ParseError::from)
+fn remap_execute(
+    config: &Config,
+    execute: &Path,
+    hosts: &[String],
+) -> Result<RemoteExecution> {
+    let hosts = map_hosts(config, hosts);
+
+    // This is always one script for the execute key
+    let scripts = vec![map_remote_execution_script(
+        execute,
+        &RemoteExecutionType::Execute,
+    )?];
+
+    Ok(RemoteExecution::new(hosts, scripts))
 }
 
 fn map_remote_executions(
@@ -811,17 +844,7 @@ fn map_remote_executions(
         Vec::with_capacity(remote_executions.len());
 
     for remote_execution in remote_executions.iter() {
-        let mut mapped_hosts = Vec::with_capacity(remote_execution.hosts.len());
-        for c_host in config.hosts.iter() {
-            for host in remote_execution.hosts.iter() {
-                if c_host.name == *host {
-                    mapped_hosts.push(Host {
-                        name: c_host.name.clone(),
-                        address: c_host.address.clone(),
-                    });
-                }
-            }
-        }
+        let hosts = map_hosts(config, &remote_execution.hosts);
 
         let mapped_scripts = map_remote_execution_scripts(
             remote_execution,
@@ -829,7 +852,7 @@ fn map_remote_executions(
         )?;
 
         mapped_remote_executions
-            .push(RemoteExecution::new(mapped_hosts, mapped_scripts));
+            .push(RemoteExecution::new(hosts, mapped_scripts));
     }
     Ok(mapped_remote_executions)
 }
@@ -838,20 +861,26 @@ fn map_remote_execution_scripts(
     remote_execution: &RemoteExecutionConfig,
     remote_execution_type: &RemoteExecutionType,
 ) -> Result<Vec<PathBuf>> {
-    let mut mapped_scripts: Vec<PathBuf> =
-        Vec::with_capacity(remote_execution.scripts.len());
+    Ok(remote_execution
+        .scripts
+        .iter()
+        .map(|script| {
+            map_remote_execution_script(script, remote_execution_type)
+        })
+        .collect::<Result<Vec<PathBuf>>>()?)
+}
 
-    for script in remote_execution.scripts.iter() {
-        let basename = script.file_name().expect(
-            format!("The script {:?} should have had a filename", script)
-                .as_str(),
-        );
-        let new_path =
-            PathBuf::from(format!("{STORAGE_DIR}/{remote_execution_type}"))
-                .join(basename);
-        mapped_scripts.push(std::path::absolute(new_path)?);
-    }
-    Ok(mapped_scripts)
+fn map_remote_execution_script(
+    script: &Path,
+    remote_execution_type: &RemoteExecutionType,
+) -> Result<PathBuf> {
+    let basename = script.file_name().expect(
+        format!("The script {:?} should have had a filename", script).as_str(),
+    );
+    let new_path =
+        PathBuf::from(format!("{STORAGE_DIR}/{remote_execution_type}"))
+            .join(basename);
+    Ok(std::path::absolute(new_path)?)
 }
 
 pub type ExperimentRuns = (u16, Vec<Experiment>);
@@ -911,8 +940,10 @@ pub fn generate_experiments(
                 teardown,
                 RemoteExecutionType::Teardown,
             )?,
+            // TODO(joren): These hosts may no longer be needed,
+            // they are included in the struct where needed
             hosts: map_hosts(config, hosts),
-            execute: remap_execute(execute)?,
+            execute: remap_execute(config, execute, hosts)?,
             expected_arguments,
             arguments: arguments.clone(),
             exporters: map_exporters(config, exporters),
@@ -1167,7 +1198,7 @@ mod tests {
                 setup: remote_executions["setup"].clone(),
                 teardown: remote_executions["teardown"].clone(),
                 hosts: vec![re_host.clone()],
-                execute: scripts["execute"].clone(),
+                execute: remote_executions["execute"].first().unwrap().clone(),
                 expected_arguments: Some(2),
                 arguments: vec!["Argument 1".into(), "Argument 2".into()],
                 exporters: vec![]
@@ -1180,7 +1211,7 @@ mod tests {
                 setup: remote_executions["setup"].clone(),
                 teardown: remote_executions["teardown"].clone(),
                 hosts: vec![re_host.clone()],
-                execute: scripts["execute"].clone(),
+                execute: remote_executions["execute"].first().unwrap().clone(),
                 arguments: vec!["Argument 1".into()],
                 expected_arguments: Some(1),
                 exporters: vec![]
@@ -1193,7 +1224,7 @@ mod tests {
                 setup: remote_executions["setup"].clone(),
                 teardown: remote_executions["teardown"].clone(),
                 hosts: vec![re_host.clone()],
-                execute: scripts["execute"].clone(),
+                execute: remote_executions["execute"].first().unwrap().clone(),
                 expected_arguments: Some(2),
                 arguments: vec!["Argument 1".into(), "Argument 2".into()],
                 exporters: vec![exporters["test-exporter"].clone()]
@@ -1206,7 +1237,7 @@ mod tests {
                 setup: remote_executions["setup"].clone(),
                 teardown: remote_executions["teardown"].clone(),
                 hosts: vec![re_host.clone()],
-                execute: scripts["execute"].clone(),
+                execute:  remote_executions["execute"].first().unwrap().clone(),
                 expected_arguments: Some(2),
                 arguments: vec!["Argument 1".into(), "Argument 2".into()],
                 exporters: vec![exporters["test-exporter"].clone(), exporters["another-test-exporter"].clone()]

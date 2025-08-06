@@ -207,7 +207,7 @@ impl ExperimentRunner {
         info!("Experiment runner now running..");
         loop {
             if let Err(e) = self.main_loop().await {
-                error!("{e}");
+                error!("Experiment failure, aborting: {e}");
             }
         }
     }
@@ -228,6 +228,9 @@ impl ExperimentRunner {
             let hosts = Self::unique_hosts_for_all_experiments(&experiments);
             let sessions = ssh::connect_to_hosts(&hosts).await?;
 
+            let experiment_directory =
+                PathBuf::from(format!("{REMOTE_DIR}/{ts}"));
+
             // Ensure that our 'well-known' directories are present
             ssh::make_directories(
                 &sessions,
@@ -235,46 +238,61 @@ impl ExperimentRunner {
             )
             .await?;
 
+            // TODO(joren): All important files need to be uploaded to the correct
+            // directory on all the remote sessions ahead of the actual experiment runs.
+            // Whilst we want our results to populate the
+            // /srv/experimentah/<timestamp>/<repeat_no>/ directory, we want all
+            // resources for that specific experiment to instead populate the
+            // /srv/experimentah/<timestamp>/ directory.
+            // let files = Self::unique_files_for_all_experiments(&experiments);
+            // ssh::upload(&sessions, source_path, destination_path)
+
             for run in 1..=runs {
                 self.current_run.store(run, Ordering::Relaxed);
+                let variation_directory: &Path =
+                    &experiment_directory.join(run.to_string());
 
                 for experiment in experiments.iter() {
                     self.update_current_experiment(experiment, run).await;
 
-                    // let variation_sessions = Self::filter_host_sessions(
-                    //     &sessions,
-                    //     &experiment.hosts,
-                    // );
-
-                    let variation_directory =
-                        PathBuf::from(format!("{REMOTE_DIR}/{ts}/{run}"));
-                    let experiment_directory =
-                        variation_directory.parent().unwrap();
-
                     ssh::make_directory(&sessions, &variation_directory)
                         .await?;
 
-                    Self::start_exporters(
+                    // Self::start_exporters(
+                    //     &sessions,
+                    //     &experiment.exporters,
+                    //     experiment_directory,
+                    // )
+                    // .await?;
+
+                    // TODO(joren): We want to make sure that our setup/teardown
+                    // is run from the *variation* directory, and not the experiment
+                    // directory. However, we want our setup/teardown to be able to find
+                    // the script it needs to run, which should live inside of the
+                    // experiment directory.
+                    //
+                    // Therefore this function needs to change it's responsibilities
+                    Self::run_remote_executions(
                         &sessions,
-                        &experiment.exporters,
-                        experiment_directory,
+                        &experiment.setup,
+                        &experiment_directory,
                     )
                     .await?;
 
                     Self::run_remote_execution(
                         &sessions,
-                        &experiment.setup,
-                        experiment_directory,
+                        &experiment.execute,
+                        &variation_directory,
                     )
                     .await?;
 
                     // ssh::upload(&sessions, source_path, destination_path)
 
                     // run_variation(&sessions, &experiment);
-                    Self::run_remote_execution(
+                    Self::run_remote_executions(
                         &sessions,
                         &experiment.teardown,
-                        experiment_directory,
+                        &experiment_directory,
                     )
                     .await?;
                 }
@@ -354,40 +372,56 @@ impl ExperimentRunner {
             //         )
             //     }
             // }
-            match ssh::run_command(&exporter_sessions, &comm).await {
-                Ok(()) => info!("Started exporter '{}'", exporter.name),
-                Err(e) => {
-                    error!(
-                        "Failed to start exporter '{}': {}",
-                        exporter.name, e
-                    )
-                }
-            }
+
+            ssh::run_command(&exporter_sessions, &comm).await?;
+            info!("Started exporter '{}'", exporter.name);
+            // match ssh::run_command(&exporter_sessions, &comm).await {
+            //     Ok(()) => info!("Started exporter '{}'", exporter.name),
+            //     Err(e) => {
+            //         error!(
+            //             "Failed to start exporter '{}': {}",
+            //             exporter.name, e
+            //         )
+            //     }
+            // }
         }
-        println!("Finished running exporters");
+        Ok(())
+    }
+
+    async fn run_remote_executions(
+        sessions: &Sessions,
+        remote_executions: &[RemoteExecution],
+        experiment_directory: &Path,
+    ) -> Result<()> {
+        for remote_execution in remote_executions.iter() {
+            Self::run_remote_execution(
+                sessions,
+                remote_execution,
+                experiment_directory,
+            )
+            .await?;
+        }
         Ok(())
     }
 
     async fn run_remote_execution(
         sessions: &Sessions,
-        re: &[RemoteExecution],
+        remote_execution: &RemoteExecution,
         experiment_directory: &Path,
     ) -> Result<()> {
-        for stage in re.iter() {
-            let setup_sessions =
-                Self::filter_host_sessions(sessions, &stage.hosts);
-            for script in stage.scripts.iter() {
-                assert!(script.exists());
+        let setup_sessions =
+            Self::filter_host_sessions(sessions, &remote_execution.hosts);
+        for script in remote_execution.scripts.iter() {
+            assert!(script.exists());
 
-                ssh::upload(&setup_sessions, script, experiment_directory)
-                    .await?;
+            ssh::upload(&setup_sessions, script, experiment_directory).await?;
 
-                // TODO(joren): Handle error case
-                let remote_script =
-                    experiment_directory.join(script.file_name().unwrap());
-                ssh::run_script(&setup_sessions, &remote_script).await?;
-            }
+            // TODO(joren): Handle error case
+            let remote_script =
+                experiment_directory.join(script.file_name().unwrap());
+            ssh::run_script(&setup_sessions, &remote_script).await?;
         }
+
         Ok(())
     }
 }
