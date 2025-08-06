@@ -244,7 +244,8 @@ impl ExperimentRunner {
             // /srv/experimentah/<timestamp>/<repeat_no>/ directory, we want all
             // resources for that specific experiment to instead populate the
             // /srv/experimentah/<timestamp>/ directory.
-            // let files = Self::unique_files_for_all_experiments(&experiments);
+            let files = Self::unique_files_for_all_experiments(&experiments);
+            ssh::upload_many(&sessions, &files, &experiment_directory).await?;
             // ssh::upload(&sessions, source_path, destination_path)
 
             for run in 1..=runs {
@@ -282,7 +283,7 @@ impl ExperimentRunner {
                     Self::run_remote_execution(
                         &sessions,
                         &experiment.execute,
-                        &variation_directory,
+                        &experiment_directory,
                     )
                     .await?;
 
@@ -326,8 +327,8 @@ impl ExperimentRunner {
     /// These hosts should be filtered as required by each individual experiment variation.
     fn unique_hosts_for_all_experiments(
         experiments: &[Experiment],
-    ) -> Vec<String> {
-        let mut hosts: Vec<String> = experiments
+    ) -> Vec<&String> {
+        let mut hosts: Vec<&String> = experiments
             .iter()
             .flat_map(|experiment| experiment.hosts())
             .collect();
@@ -335,6 +336,21 @@ impl ExperimentRunner {
         hosts.sort();
         hosts.dedup();
         hosts
+    }
+
+    /// Loops through a slice of experiments and returns
+    /// unique filepaths for that slice.
+    fn unique_files_for_all_experiments(
+        experiments: &[Experiment],
+    ) -> Vec<&PathBuf> {
+        let mut files: Vec<&PathBuf> = experiments
+            .iter()
+            .flat_map(|experiment| experiment.files())
+            .collect();
+
+        files.sort();
+        files.dedup();
+        files
     }
 
     async fn start_exporters(
@@ -412,9 +428,9 @@ impl ExperimentRunner {
         let setup_sessions =
             Self::filter_host_sessions(sessions, &remote_execution.hosts);
         for script in remote_execution.scripts.iter() {
+            // This assertion only checks locally.
+            // Scripts should exist on the remote at this point.
             assert!(script.exists());
-
-            ssh::upload(&setup_sessions, script, experiment_directory).await?;
 
             // TODO(joren): Handle error case
             let remote_script =

@@ -646,31 +646,49 @@ pub struct Experiment {
 }
 
 impl Experiment {
-    pub fn hosts(&self) -> Vec<String> {
-        let mut hosts: HashSet<String> = HashSet::new();
-        for host in self.hosts.iter() {
-            hosts.insert(host.address.clone());
-        }
+    pub fn hosts(&self) -> Vec<&String> {
+        let mut hosts: Vec<&String> =
+            self.hosts
+                .iter()
+                .map(|host| &host.address)
+                .chain(self.exporters.iter().flat_map(|exporter| {
+                    exporter.hosts.iter().map(|host| &host.address)
+                }))
+                .chain(self.setup.iter().flat_map(|stage| {
+                    stage.hosts.iter().map(|host| &host.address)
+                }))
+                .chain(self.teardown.iter().flat_map(|stage| {
+                    stage.hosts.iter().map(|host| &host.address)
+                }))
+                .collect();
 
-        for exporter in self.exporters.iter() {
-            for host in exporter.hosts.iter() {
-                hosts.insert(host.address.clone());
-            }
-        }
+        hosts.sort();
+        hosts.dedup();
+        hosts
+    }
 
-        for stage in self.setup.iter() {
-            for host in stage.hosts.iter() {
-                hosts.insert(host.address.clone());
-            }
-        }
+    //TODO(joren): Currently we are getting all the files for all stages of the experiment and
+    //uploading them to all hosts. Want we really want to do is upload the specific files
+    //needed for each host to that host. This means that if Host 1 requires files A, B and C,
+    //whereas host 2 requires files B, C and D, then Host 1 and 2 should be sent the
+    //corresponding 3 files each.
+    //Dumb solution is good for testing though.
+    pub fn files(&self) -> Vec<&PathBuf> {
+        let mut files: Vec<&PathBuf> = self
+            .execute
+            .scripts
+            .iter()
+            .chain(self.setup.iter().flat_map(|setup| setup.scripts.iter()))
+            .chain(
+                self.teardown
+                    .iter()
+                    .flat_map(|teardown| teardown.scripts.iter()),
+            )
+            .collect();
 
-        for stage in self.teardown.iter() {
-            for host in stage.hosts.iter() {
-                hosts.insert(host.address.clone());
-            }
-        }
-
-        hosts.drain().collect::<Vec<String>>()
+        files.sort();
+        files.dedup();
+        files
     }
 }
 

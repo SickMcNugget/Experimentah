@@ -2,7 +2,7 @@
 use log::info;
 use openssh::{KnownHosts, Session};
 use openssh_sftp_client::{Sftp, SftpOptions};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 // use std::process::Command;
 use std::collections::HashMap;
 use std::string::FromUtf8Error;
@@ -190,7 +190,7 @@ impl From<(String, String, Option<i32>)> for SSHError {
 //     }
 // }
 
-pub async fn connect_to_hosts(hosts: &[String]) -> Result<Sessions> {
+pub async fn connect_to_hosts(hosts: &[&String]) -> Result<Sessions> {
     if hosts.is_empty() {
         Err(SSHError::StateError(
             "No hosts were present for connection".to_string(),
@@ -253,6 +253,60 @@ pub async fn upload(
     for task in tasks {
         task.await?;
         // println!("{}", String::from_utf8(output.stdout).unwrap());
+    }
+
+    Ok(())
+}
+
+pub async fn upload_many(
+    sessions: &Sessions,
+    source_paths: &[&PathBuf],
+    destination_path: &Path,
+) -> Result<()> {
+    if sessions.is_empty() {
+        Err(SSHError::StateError(
+            "No sessions were present when trying to run a command".to_string(),
+        ))?;
+    }
+
+    let mut has_dir = false;
+    for source_path in source_paths {
+        if !source_path.exists() {
+            Err(SSHError::StateError(format!(
+                "Error during SSH upload: '{}' does not exist",
+                source_path.display()
+            )))?;
+        }
+
+        if source_path.is_dir() {
+            has_dir = true;
+        }
+    }
+
+    let mut command = vec!["scp".to_string()];
+    if has_dir {
+        command.push("-r".to_string());
+    }
+
+    for source_path in source_paths {
+        command.push(source_path.to_string_lossy().to_string());
+    }
+
+    let mut tasks = Vec::with_capacity(sessions.len());
+    for (host, _) in sessions.iter() {
+        let mut command_c = command.to_vec();
+        command_c
+            .push(format!("{host}:{}", destination_path.to_string_lossy()));
+
+        tasks.push(
+            tokio::process::Command::new(command_c.first().unwrap())
+                .args(&command_c[1..])
+                .output(),
+        );
+    }
+
+    for task in tasks {
+        task.await?;
     }
 
     Ok(())
