@@ -80,7 +80,7 @@ impl SSHError {
 
         match code {
             Some(code) => {
-                msg += &format!("process exited with status: {}: ", code)
+                msg += &format!("process exited with status code '{}': ", code)
             }
             None => msg += "process terminated by signal: ",
         }
@@ -527,7 +527,10 @@ pub async fn run_script(sessions: &Sessions, script: &Path) -> Result<()> {
                     // println!("'{host_c}'\nstdout\n{stdout}\nstderr\n{stderr}");
                 }
                 Err(e) => {
-                    panic!("Output failed for host {host_c} with error: {e}");
+                    panic!(
+                        "Failed to run the script '{}' on '{host_c}': {e}",
+                        script_c.file_name().unwrap().to_string_lossy()
+                    );
                 }
             };
             Ok(())
