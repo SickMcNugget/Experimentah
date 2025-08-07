@@ -13,6 +13,7 @@ pub mod ssh;
 /// - storage/execute - Contains execute scripts
 /// - storage/results - Contains collected results
 /// - storage/exporters - Contains exporter binaries
+///
 /// Some important files are:
 /// - storage/<DATABASE>
 pub const STORAGE_DIR: &str = "storage";

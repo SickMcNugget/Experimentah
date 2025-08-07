@@ -1,34 +1,30 @@
 // use futures_core::stream::Stream;
-use log::info;
-use openssh::{KnownHosts, Session};
+use openssh::KnownHosts;
 use openssh_sftp_client::{Sftp, SftpOptions};
+use std::future::Future;
 use std::path::{Path, PathBuf};
 // use std::process::Command;
 use std::collections::HashMap;
 use std::string::FromUtf8Error;
 use std::sync::Arc;
 use std::{fmt, io};
-use tokio::task::{self, JoinHandle};
+use tokio::task::{self};
 
 use crate::INTERPRETER;
 
-// Bit ugly, but we need separate maps for the normal Sessions and SFTP ones.
-// type SessionMap = HashMap<String, Arc<Session>>;
-// type SFTPMap = HashMap<String, Arc<Sftp>>;
-// type AnyError = Box<dyn std::error::Error>;
-pub type Sessions = HashMap<String, Arc<SFTPSession>>;
-// type AnyError = Box<dyn std::error::Error + Send + Sync + 'static>;
+pub type Session = Arc<SFTPSession>;
+pub type Sessions = HashMap<String, Session>;
 
 pub type Result<T> = std::result::Result<T, SSHError>;
 
 #[derive(Debug)]
 pub struct SFTPSession {
-    session: Session,
+    session: openssh::Session,
     sftp: Sftp,
 }
 
 impl SFTPSession {
-    fn new(session: Session, sftp: Sftp) -> Self {
+    fn new(session: openssh::Session, sftp: Sftp) -> Self {
         Self { session, sftp }
     }
 }
@@ -181,15 +177,6 @@ impl From<(String, String, Option<i32>)> for SSHError {
     }
 }
 
-// #[derive(Debug, Clone)]
-// struct NoTargetError;
-// impl std::error::Error for NoTargetError {}
-// impl fmt::Display for NoTargetError {
-//     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-//         write!(f, "Empty Targets List is disallowed (must be at least one valid host)")
-//     }
-// }
-
 pub async fn connect_to_hosts(hosts: &[&String]) -> Result<Sessions> {
     if hosts.is_empty() {
         Err(SSHError::StateError(
@@ -199,9 +186,10 @@ pub async fn connect_to_hosts(hosts: &[&String]) -> Result<Sessions> {
 
     let mut sessions: Sessions = HashMap::new();
     for host in hosts.iter() {
-        let session = Session::connect(host, KnownHosts::Strict).await?;
+        let session =
+            openssh::Session::connect(host, KnownHosts::Strict).await?;
         let sftp = Sftp::from_session(
-            Session::connect(host, KnownHosts::Strict).await?,
+            openssh::Session::connect(host, KnownHosts::Strict).await?,
             SftpOptions::new(),
         )
         .await?;
@@ -214,61 +202,19 @@ pub async fn connect_to_hosts(hosts: &[&String]) -> Result<Sessions> {
     Ok(sessions)
 }
 
-// Since the Sftp library we use just sucks,
-// we use simple subprocess commands instead.
-pub async fn upload(
+pub async fn upload_one(
     sessions: &Sessions,
     source_path: &Path,
     destination_path: &Path,
 ) -> Result<()> {
-    if sessions.is_empty() {
-        Err(SSHError::StateError(
-            "No sessions were present when trying to run a command".to_string(),
-        ))?;
-    } else if !source_path.exists() {
-        Err(SSHError::StateError(
-            "The source path to upload does not exist".to_string(),
-        ))?;
-    }
-
-    let mut command = vec!["scp".to_string()];
-    if source_path.is_dir() {
-        command.push("-r".to_string());
-    }
-    command.push(source_path.to_string_lossy().to_string());
-
-    let mut tasks = Vec::with_capacity(sessions.len());
-    for (host, _) in sessions.iter() {
-        let mut command_c = command.to_vec();
-        command_c
-            .push(format!("{host}:{}", destination_path.to_string_lossy()));
-
-        tasks.push(
-            tokio::process::Command::new(command_c.first().unwrap())
-                .args(&command_c[1..])
-                .output(),
-        );
-    }
-
-    for task in tasks {
-        task.await?;
-        // println!("{}", String::from_utf8(output.stdout).unwrap());
-    }
-
-    Ok(())
+    upload(sessions, &[source_path], destination_path).await
 }
 
-pub async fn upload_many(
+pub async fn upload(
     sessions: &Sessions,
-    source_paths: &[&PathBuf],
+    source_paths: &[&Path],
     destination_path: &Path,
 ) -> Result<()> {
-    if sessions.is_empty() {
-        Err(SSHError::StateError(
-            "No sessions were present when trying to run a command".to_string(),
-        ))?;
-    }
-
     let mut has_dir = false;
     for source_path in source_paths {
         if !source_path.exists() {
@@ -292,24 +238,24 @@ pub async fn upload_many(
         command.push(source_path.to_string_lossy().to_string());
     }
 
-    let mut tasks = Vec::with_capacity(sessions.len());
-    for (host, _) in sessions.iter() {
-        let mut command_c = command.to_vec();
-        command_c
-            .push(format!("{host}:{}", destination_path.to_string_lossy()));
+    let params = (command, destination_path.to_path_buf());
 
-        tasks.push(
-            tokio::process::Command::new(command_c.first().unwrap())
-                .args(&command_c[1..])
-                .output(),
-        );
-    }
+    common_async(sessions, do_scp, params).await
+}
 
-    for task in tasks {
-        task.await?;
-    }
+async fn do_scp(
+    host: String,
+    _: Session,
+    params: (Vec<String>, PathBuf),
+) -> Result<std::process::Output> {
+    let (mut command, destination_path) = params;
+    command.push(format!("{host}:{}", destination_path.to_string_lossy()));
 
-    Ok(())
+    tokio::process::Command::new(command.first().unwrap())
+        .args(&command[1..])
+        .output()
+        .await
+        .map_err(SSHError::from)
 }
 
 // pub async fn run_background_command(sessions: &Sessions, command_args: &[String]) -> Result<()> {
@@ -358,159 +304,64 @@ pub async fn upload_many(
 //     Ok(())
 // }
 
+fn cd_command(path: &Path) -> [String; 3] {
+    ["cd".into(), path.to_string_lossy().into(), "&&".into()]
+}
+
 pub async fn run_command_at(
     sessions: &Sessions,
     command_args: &[String],
     directory: &Path,
 ) -> Result<()> {
-    let cd_command = [
-        "cd".to_string(),
-        directory.to_string_lossy().to_string(),
-        "&&".to_string(),
-    ];
+    let cd_command = cd_command(directory);
     let command_args: Vec<String> =
         cd_command.iter().chain(command_args).cloned().collect();
     run_command(sessions, &command_args).await
-}
-
-pub async fn run_command_silent_at(
-    sessions: &Sessions,
-    command_args: &[String],
-    directory: &Path,
-) -> Result<()> {
-    let cd_command = [
-        "cd".to_string(),
-        directory.to_string_lossy().to_string(),
-        "&&".to_string(),
-    ];
-    let command_args: Vec<String> =
-        cd_command.iter().chain(command_args).cloned().collect();
-    run_command_silent(sessions, &command_args).await
-}
-
-pub async fn run_command_silent(
-    sessions: &Sessions,
-    command_args: &[String],
-) -> Result<()> {
-    if sessions.is_empty() {
-        Err(SSHError::StateError(
-            "No sessions were present when trying to run a command".to_string(),
-        ))?;
-    } else if command_args.is_empty() {
-        Err(SSHError::StateError(
-            "No command was supplied when trying to run a command remotely"
-                .to_string(),
-        ))?;
-    }
-
-    let mut tasks: Vec<JoinHandle<Result<()>>> =
-        Vec::with_capacity(sessions.len());
-    for (host, session) in sessions.iter() {
-        let host_c = host.clone();
-        let session_c = session.clone();
-
-        // We assume the use of bash
-        // TODO(joren): Add "sh" downgrade functionality
-        // let interpreter = "bash";
-
-        // Since we run our command through bash, we should treat it as
-        // one single argument so that bash can do the splitting
-        // let command_c = command_args.first().unwrap().clone();
-        let command_args_c = command_args.join(" ");
-
-        tasks.push(task::spawn(async move {
-            remote_command(session_c, &host_c, &command_args_c, |_, _| {}).await
-        }));
-    }
-
-    // We have our JoinError and also an internal SSHError
-    for task in tasks.into_iter() {
-        task.await??;
-    }
-    Ok(())
-}
-
-/// The internal implementation for running a command remotely via SSH.
-/// This function uses a closure for separate processing of the command output.
-/// For our use case, this closure either echoes stdout, or allows silent command execution.
-async fn remote_command<F>(
-    session: Arc<SFTPSession>,
-    host: &String,
-    command_args: &String,
-    output_closure: F,
-) -> Result<()>
-where
-    F: FnOnce(&str, Vec<u8>),
-{
-    let program = &command_args[..command_args.find(' ').unwrap()];
-
-    let mut owned_command = session.session.command(INTERPRETER);
-    owned_command.args(["-c", command_args]);
-
-    let err_str = format!("Failed to run program '{program}' on host {host}");
-
-    match owned_command.output().await {
-        Ok(output) => {
-            if !output.status.success() {
-                let stderr = String::from_utf8(output.stderr).map_err(|e| {
-                    SSHError::OutputError(format!("Failed to convert stderr bytes to UTF-8 for program '{program}' on host '{host}'"), e)
-                })?;
-                Err((err_str, stderr, output.status.code()))?;
-            }
-
-            output_closure(host, output.stdout);
-        }
-        Err(e) => {
-            Err((err_str, e))?;
-        }
-    }
-    Ok(())
 }
 
 pub async fn run_command(
     sessions: &Sessions,
     command_args: &[String],
 ) -> Result<()> {
-    if sessions.is_empty() {
-        Err(SSHError::StateError(
-            "No sessions were present when trying to run a command".to_string(),
-        ))?;
-    } else if command_args.is_empty() {
+    if command_args.is_empty() {
         Err(SSHError::StateError(
             "No command was supplied when trying to run a command remotely"
                 .to_string(),
         ))?;
     }
 
-    let mut tasks: Vec<JoinHandle<Result<()>>> =
-        Vec::with_capacity(sessions.len());
-    for (host, session) in sessions.iter() {
-        let host_c = host.clone();
-        let session_c = session.clone();
+    let params = command_args.to_vec();
+    common_async(sessions, remote_command, params).await
+}
 
-        // We assume the use of bash
-        // TODO(joren): Add "sh" downgrade functionality
+async fn remote_command(
+    host: String,
+    session: Arc<SFTPSession>,
+    command_args: Vec<String>,
+) -> Result<()> {
+    let command_c = command_args.first().unwrap();
+    let command_args_c = command_args.join(" ");
 
-        // Since we run our command through bash, we should treat it as
-        // one single argument so that bash can do the splitting
-        let command_c = command_args.first().unwrap().clone();
-        let command_args_c = command_args.join(" ");
+    let mut owned_command = session.session.command(INTERPRETER);
+    owned_command.args(["-c", &command_args_c]);
 
-        // Decide whether this string handling should work with results
-        tasks.push(task::spawn(async move {remote_command(session_c, &host_c, &command_args_c, |host, stdout|{
-            let stdout = String::from_utf8(stdout).map_err(|e| {
-                SSHError::OutputError(format!("Failed to convert stdout bytes to UTF-8 for command '{command_c}' on host '{host_c}'"), e)
-            }).unwrap();
+    let err_str = format!("Failed to run program '{command_c}' on host {host}");
 
-            if !stdout.is_empty() {
-                print!("Stdout for command '{command_c}' on {host}\n{stdout}");
+    match owned_command.output().await {
+        Ok(output) => {
+            if !output.status.success() {
+                let stderr = String::from_utf8(output.stderr).map_err(|e| {
+                    SSHError::OutputError(format!("Failed to convert stderr bytes to UTF-8 for program '{command_c}' on host '{host}'"), e)
+                })?;
+                Err((err_str, stderr, output.status.code()))?;
             }
-        }).await}));
-    }
 
-    // We have our JoinError and also an internal SSHError
-    for task in tasks.into_iter() {
-        task.await??;
+            // TODO(joren): Add back a way to interact with output?
+            // output_closure(host, output.stdout);
+        }
+        Err(e) => {
+            Err((err_str, e))?;
+        }
     }
     Ok(())
 }
@@ -522,13 +373,9 @@ pub async fn make_directories(
     sessions: &Sessions,
     paths: &[&Path],
 ) -> Result<()> {
-    let paths: Vec<String> = paths
-        .iter()
-        .map(|path| path.to_string_lossy().to_string())
-        .collect();
-    let command: Vec<String> = vec!["mkdir".to_string(), "-p".to_string()]
+    let command: Vec<String> = ["mkdir".to_string(), "-p".to_string()]
         .into_iter()
-        .chain(paths)
+        .chain(paths.iter().map(|path| path.to_string_lossy().to_string()))
         .collect();
 
     run_command(sessions, &command).await
@@ -542,60 +389,69 @@ pub async fn make_directory(sessions: &Sessions, path: &Path) -> Result<()> {
         .await
 }
 
-/// Note that the script in question is run remotely,
-/// so it must already exist on the target sessions
-pub async fn run_script(sessions: &Sessions, script: &Path) -> Result<()> {
+/// This function does a lot of heavy lifting when we make remote requests.
+/// Since all of our SSH functionality requires reaching out to multiple hosts
+/// simultaneously, we need to generate asynchronous tasks that can run in parallel.
+/// We also need flexibility, hence the use of a generic function.
+/// Generally we want to return something from our function, but it can be (), too.
+///
+/// Some important notes about using this function.
+/// Make sure that owned types are sent in; Don't use a &[String], use a Vec<String>.
+async fn common_async<T, P, Fut>(
+    sessions: &Sessions,
+    task_fn: impl Fn(String, Arc<SFTPSession>, P) -> Fut + Send + 'static + Copy,
+    params: P,
+) -> Result<()>
+where
+    T: Send + 'static,
+    Fut: Future<Output = Result<T>> + Send + 'static,
+    P: Clone + Send + 'static,
+{
     if sessions.is_empty() {
         Err(SSHError::StateError(
             "No sessions were present when trying to run a command".to_string(),
         ))?;
     }
 
-    let mut tasks: Vec<JoinHandle<Result<()>>> =
-        Vec::with_capacity(sessions.len());
+    // let mut tasks: Vec<JoinHandle<BoxFuture<'static, Result<T>>>> =
+    //     Vec::with_capacity(sessions.len());
+    let mut tasks = Vec::with_capacity(sessions.len());
     for (host, session) in sessions.iter() {
+        // These two variables are always available for the async block
         let host_c = host.clone();
         let session_c = session.clone();
-        let script_c = script.to_path_buf();
+        let params_c = params.clone();
 
         tasks.push(task::spawn(async move {
-            let mut s_command = session_c.session.command(INTERPRETER);
-            let script_c_str = script_c.to_string_lossy();
-            s_command.arg(&script_c_str);
-
-            match s_command.output().await {
-                Ok(_) => {
-                    // format!("Failed to convert output for command '{command_c}' on host '{host_c}' to string.").as_str()
-                    // let stdout = String::from_utf8(output.stdout).map_err(|e| {
-                    //     SSHError::OutputError(format!("Failed to convert stdout bytes to UTF-8 for script '{script_c_str}' on host '{host_c}'"), e)
-                    // })?;
-                    // let stderr = String::from_utf8(output.stderr).map_err(|e| {
-                    //     SSHError::OutputError(format!("Failed to convert stderr bytes to UTF-8 for script '{script_c_str}' on host '{host_c}'"), e)
-                    // })?;
-
-                    info!(
-                        "Successfully ran script '{}' on '{host_c}'",
-                        script_c.file_name().unwrap().to_string_lossy()
-                    );
-                    // info!("Command success on '{host_c}'");
-                    // println!("'{host_c}'\nstdout\n{stdout}\nstderr\n{stderr}");
-                }
-                Err(e) => {
-                    panic!(
-                        "Failed to run the script '{}' on '{host_c}': {e}",
-                        script_c.file_name().unwrap().to_string_lossy()
-                    );
-                }
-            };
-            Ok(())
+            Box::pin(task_fn(host_c, session_c, params_c)).await
         }));
     }
 
-    // We have our JoinError and also an internal SSHError
     for task in tasks.into_iter() {
-        task.await??;
+        // The extra await was added by the fact that we now have to Box
+        // our future since it can return generic types
+        // A small price to pay for more dynamic functionality
+        let _res = task.await??;
+        // TODO(joren): Add a way to play with return results here
     }
+
     Ok(())
+}
+
+/// Note that the script in question is run remotely,
+/// so it must already exist on the target sessions
+pub async fn run_script(sessions: &Sessions, script: &Path) -> Result<()> {
+    let args = [script.to_string_lossy().to_string()];
+    run_command(sessions, &args).await
+}
+
+pub async fn run_script_at(
+    sessions: &Sessions,
+    script: &Path,
+    directory: &Path,
+) -> Result<()> {
+    let args = [script.to_string_lossy().to_string()];
+    run_command_at(sessions, &args, directory).await
 }
 
 // ----- DANIEL'S IMPLEMENTATION OF SSH FUNCTIONALITY. KEEP THIS AROUND FOR REFERENCE AND -----

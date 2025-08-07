@@ -1,6 +1,4 @@
-use crate::parse::{
-    Experiment, ExperimentRuns, Exporter, Host, RemoteExecution,
-};
+use crate::parse::{Experiment, ExperimentRuns, Host, RemoteExecution};
 use crate::{time_since_epoch, EXPORTER_DIR, REMOTE_DIR};
 
 const MAX_EXPERIMENTS: usize = 32;
@@ -226,8 +224,7 @@ impl ExperimentRunner {
                 for experiment in experiments.iter() {
                     self.update_current_experiment(experiment, run).await;
 
-                    ssh::make_directory(&sessions, &variation_directory)
-                        .await?;
+                    ssh::make_directory(&sessions, variation_directory).await?;
 
                     // Self::start_exporters(
                     //     &sessions,

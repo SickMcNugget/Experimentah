@@ -2,7 +2,6 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use log::error;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 use std::fmt::Display;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -618,10 +617,7 @@ impl RemoteExecutionConfig {
 
         check_files_exist(&scripts).map_err(|e| {
             ParseError::from((
-                format!(
-                    "Missing files for {}",
-                    remote_execution_type.to_string()
-                ),
+                format!("Missing files for {}", remote_execution_type),
                 e,
             ))
         })
@@ -796,7 +792,7 @@ impl RemoteExecution {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-enum RemoteExecutionType {
+pub enum RemoteExecutionType {
     Setup,
     Teardown,
     Execute,
@@ -913,22 +909,22 @@ fn map_remote_execution_scripts(
     remote_execution: &RemoteExecutionConfig,
     remote_execution_type: &RemoteExecutionType,
 ) -> Result<Vec<PathBuf>> {
-    Ok(remote_execution
+    remote_execution
         .scripts
         .iter()
         .map(|script| {
             map_remote_execution_script(script, remote_execution_type)
         })
-        .collect::<Result<Vec<PathBuf>>>()?)
+        .collect::<Result<Vec<PathBuf>>>()
 }
 
 fn map_remote_execution_script(
     script: &Path,
     remote_execution_type: &RemoteExecutionType,
 ) -> Result<PathBuf> {
-    let basename = script.file_name().expect(
-        format!("The script {:?} should have had a filename", script).as_str(),
-    );
+    let basename = script.file_name().unwrap_or_else(|| {
+        panic!("The script {:?} should have had a filename", script)
+    });
     let new_path =
         PathBuf::from(format!("{STORAGE_DIR}/{remote_execution_type}"))
             .join(basename);
