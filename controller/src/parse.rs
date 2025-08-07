@@ -673,17 +673,18 @@ impl Experiment {
     //whereas host 2 requires files B, C and D, then Host 1 and 2 should be sent the
     //corresponding 3 files each.
     //Dumb solution is good for testing though.
-    pub fn files(&self) -> Vec<&PathBuf> {
-        let mut files: Vec<&PathBuf> = self
+    pub fn files(&self) -> Vec<&Path> {
+        let mut files: Vec<&Path> = self
             .execute
             .scripts
             .iter()
-            .chain(self.setup.iter().flat_map(|setup| setup.scripts.iter()))
-            .chain(
-                self.teardown
-                    .iter()
-                    .flat_map(|teardown| teardown.scripts.iter()),
-            )
+            .map(|script| script.as_path())
+            .chain(self.setup.iter().flat_map(|setup| {
+                setup.scripts.iter().map(|script| script.as_path())
+            }))
+            .chain(self.teardown.iter().flat_map(|teardown| {
+                teardown.scripts.iter().map(|script| script.as_path())
+            }))
             .collect();
 
         files.sort();
@@ -761,14 +762,40 @@ impl Exporter {
 pub struct RemoteExecution {
     pub hosts: Vec<Host>,
     pub scripts: Vec<PathBuf>,
+    pub re_type: RemoteExecutionType,
 }
 
 impl RemoteExecution {
-    fn new(hosts: Vec<Host>, scripts: Vec<PathBuf>) -> Self {
-        Self { hosts, scripts }
+    fn new(
+        hosts: Vec<Host>,
+        scripts: Vec<PathBuf>,
+        re_type: RemoteExecutionType,
+    ) -> Self {
+        Self {
+            hosts,
+            scripts,
+            re_type,
+        }
+    }
+
+    pub fn remote_scripts(&self) -> Vec<PathBuf> {
+        //TODO(joren): Decide whether it would be worth organising scripts into
+        //setup/teardown/execute directories when they are on remotes.
+        self.scripts
+            .iter()
+            .map(|script| {
+                let filename = script.file_name().unwrap().to_string_lossy();
+                PathBuf::from(filename.to_string())
+                // PathBuf::from(format!(
+                //     "{}/{filename}",
+                //     self.re_type.to_string()
+                // ))
+            })
+            .collect()
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
 enum RemoteExecutionType {
     Setup,
     Teardown,
@@ -850,7 +877,11 @@ fn remap_execute(
         &RemoteExecutionType::Execute,
     )?];
 
-    Ok(RemoteExecution::new(hosts, scripts))
+    Ok(RemoteExecution::new(
+        hosts,
+        scripts,
+        RemoteExecutionType::Execute,
+    ))
 }
 
 fn map_remote_executions(
@@ -869,8 +900,11 @@ fn map_remote_executions(
             &remote_execution_type,
         )?;
 
-        mapped_remote_executions
-            .push(RemoteExecution::new(hosts, mapped_scripts));
+        mapped_remote_executions.push(RemoteExecution::new(
+            hosts,
+            mapped_scripts,
+            remote_execution_type.clone(),
+        ));
     }
     Ok(mapped_remote_executions)
 }
@@ -1176,6 +1210,7 @@ mod tests {
                 vec![RemoteExecution {
                     hosts: vec![re_host.clone()],
                     scripts: vec![script.clone()],
+                    re_type: RemoteExecutionType::from_str(stage).unwrap(),
                 }],
             );
         }
