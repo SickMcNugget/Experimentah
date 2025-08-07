@@ -63,18 +63,6 @@ impl std::error::Error for RuntimeError {
     }
 }
 
-// impl From<(&str, reqwest::Error)> for RuntimeError {
-//     fn from(value: (&str, reqwest::Error)) -> Self {
-//         RuntimeError::ReqwestError(value.0.to_string(), value.1)
-//     }
-// }
-//
-// impl From<(String, reqwest::Error)> for RuntimeError {
-//     fn from(value: (String, reqwest::Error)) -> Self {
-//         RuntimeError::ReqwestError(value.0, value.1)
-//     }
-// }
-
 impl From<(&str, std::io::Error)> for RuntimeError {
     fn from(value: (&str, std::io::Error)) -> Self {
         RuntimeError::IOError(value.0.to_string(), value.1)
@@ -99,12 +87,6 @@ impl From<ssh::SSHError> for RuntimeError {
     }
 }
 
-// impl From<(String, reqwest::StatusCode)> for RuntimeError {
-//     fn from(value: (String, reqwest::StatusCode)) -> Self {
-//         RuntimeError::BadStatusCode(value.0, value.1)
-//     }
-// }
-
 impl From<String> for RuntimeError {
     fn from(value: String) -> Self {
         RuntimeError::Generic(value)
@@ -116,17 +98,6 @@ impl From<&str> for RuntimeError {
         RuntimeError::Generic(value.to_string())
     }
 }
-
-// struct ChildProcess {
-//     address: String,
-//     child: Child,
-// }
-//
-// impl ChildProcess {
-//     fn new(address: String, child: Child) -> Self {
-//         Self { address, child }
-//     }
-// }
 
 type ExperimentQueue = Mutex<VecDeque<ExperimentRuns>>;
 
@@ -245,8 +216,7 @@ impl ExperimentRunner {
             // resources for that specific experiment to instead populate the
             // /srv/experimentah/<timestamp>/ directory.
             let files = Self::unique_files_for_all_experiments(&experiments);
-            ssh::upload_many(&sessions, &files, &experiment_directory).await?;
-            // ssh::upload(&sessions, source_path, destination_path)
+            ssh::upload(&sessions, &files, &experiment_directory).await?;
 
             for run in 1..=runs {
                 self.current_run.store(run, Ordering::Relaxed);
@@ -273,19 +243,24 @@ impl ExperimentRunner {
                     // experiment directory.
                     //
                     // Therefore this function needs to change it's responsibilities
+
                     Self::run_remote_executions(
                         &sessions,
                         &experiment.setup,
                         &experiment_directory,
+                        variation_directory,
                     )
                     .await?;
+                    info!("Variation setup complete");
 
                     Self::run_remote_execution(
                         &sessions,
                         &experiment.execute,
                         &experiment_directory,
+                        variation_directory,
                     )
                     .await?;
+                    info!("Variation complete");
 
                     // ssh::upload(&sessions, source_path, destination_path)
 
@@ -294,8 +269,10 @@ impl ExperimentRunner {
                         &sessions,
                         &experiment.teardown,
                         &experiment_directory,
+                        variation_directory,
                     )
                     .await?;
+                    info!("Variation teardown complete");
                 }
             }
             info!("Finished experiments");
@@ -342,8 +319,8 @@ impl ExperimentRunner {
     /// unique filepaths for that slice.
     fn unique_files_for_all_experiments(
         experiments: &[Experiment],
-    ) -> Vec<&PathBuf> {
-        let mut files: Vec<&PathBuf> = experiments
+    ) -> Vec<&Path> {
+        let mut files: Vec<&Path> = experiments
             .iter()
             .flat_map(|experiment| experiment.files())
             .collect();
@@ -353,67 +330,69 @@ impl ExperimentRunner {
         files
     }
 
-    async fn start_exporters(
-        sessions: &Sessions,
-        exporters: &[Exporter],
-        experiment_directory: &Path,
-    ) -> Result<()> {
-        for exporter in exporters.iter() {
-            let exporter_sessions =
-                Self::filter_host_sessions(sessions, &exporter.hosts);
-
-            for setup in exporter.setup.iter() {
-                // TODO(joren): Handle shlex error
-                let setup_comm = shlex::split(setup).unwrap();
-                ssh::run_command_silent_at(
-                    &exporter_sessions,
-                    &setup_comm,
-                    experiment_directory,
-                )
-                .await?;
-            }
-
-            //TODO(joren): Error check split
-            let comm = shlex::split(&exporter.command).unwrap();
-
-            // The exporter needs a file to be created which we can refer to in the event
-            // of an experimentah crash.
-            // We can make use of the flock command when running our exporters
-            // match ssh::run_background_command(&exporter_sessions, &comm).await {
-            //     Ok(child) => info!("Started exporter '{}'", exporter.name),
-            //     Err(e) => {
-            //         error!(
-            //             "Failed to start exporter '{}': {}",
-            //             exporter.name, e
-            //         )
-            //     }
-            // }
-
-            ssh::run_command(&exporter_sessions, &comm).await?;
-            info!("Started exporter '{}'", exporter.name);
-            // match ssh::run_command(&exporter_sessions, &comm).await {
-            //     Ok(()) => info!("Started exporter '{}'", exporter.name),
-            //     Err(e) => {
-            //         error!(
-            //             "Failed to start exporter '{}': {}",
-            //             exporter.name, e
-            //         )
-            //     }
-            // }
-        }
-        Ok(())
-    }
+    // async fn start_exporters(
+    //     sessions: &Sessions,
+    //     exporters: &[Exporter],
+    //     experiment_directory: &Path,
+    // ) -> Result<()> {
+    //     for exporter in exporters.iter() {
+    //         let exporter_sessions =
+    //             Self::filter_host_sessions(sessions, &exporter.hosts);
+    //
+    //         for setup in exporter.setup.iter() {
+    //             // TODO(joren): Handle shlex error
+    //             let setup_comm = shlex::split(setup).unwrap();
+    //             ssh::run_command_silent_at(
+    //                 &exporter_sessions,
+    //                 &setup_comm,
+    //                 experiment_directory,
+    //             )
+    //             .await?;
+    //         }
+    //
+    //         //TODO(joren): Error check split
+    //         let comm = shlex::split(&exporter.command).unwrap();
+    //
+    //         // The exporter needs a file to be created which we can refer to in the event
+    //         // of an experimentah crash.
+    //         // We can make use of the flock command when running our exporters
+    //         // match ssh::run_background_command(&exporter_sessions, &comm).await {
+    //         //     Ok(child) => info!("Started exporter '{}'", exporter.name),
+    //         //     Err(e) => {
+    //         //         error!(
+    //         //             "Failed to start exporter '{}': {}",
+    //         //             exporter.name, e
+    //         //         )
+    //         //     }
+    //         // }
+    //
+    //         ssh::run_command(&exporter_sessions, &comm).await?;
+    //         info!("Started exporter '{}'", exporter.name);
+    //         // match ssh::run_command(&exporter_sessions, &comm).await {
+    //         //     Ok(()) => info!("Started exporter '{}'", exporter.name),
+    //         //     Err(e) => {
+    //         //         error!(
+    //         //             "Failed to start exporter '{}': {}",
+    //         //             exporter.name, e
+    //         //         )
+    //         //     }
+    //         // }
+    //     }
+    //     Ok(())
+    // }
 
     async fn run_remote_executions(
         sessions: &Sessions,
         remote_executions: &[RemoteExecution],
         experiment_directory: &Path,
+        variation_directory: &Path,
     ) -> Result<()> {
         for remote_execution in remote_executions.iter() {
             Self::run_remote_execution(
                 sessions,
                 remote_execution,
                 experiment_directory,
+                variation_directory,
             )
             .await?;
         }
@@ -424,18 +403,26 @@ impl ExperimentRunner {
         sessions: &Sessions,
         remote_execution: &RemoteExecution,
         experiment_directory: &Path,
+        variation_directory: &Path,
     ) -> Result<()> {
         let setup_sessions =
             Self::filter_host_sessions(sessions, &remote_execution.hosts);
-        for script in remote_execution.scripts.iter() {
+        for remote_script in remote_execution.remote_scripts().iter() {
             // This assertion only checks locally.
             // Scripts should exist on the remote at this point.
-            assert!(script.exists());
+            // assert!(remotescript.exists());
 
+            let remote_script = experiment_directory.join(remote_script);
+            ssh::run_script_at(
+                &setup_sessions,
+                &remote_script,
+                variation_directory,
+            )
+            .await?;
             // TODO(joren): Handle error case
-            let remote_script =
-                experiment_directory.join(script.file_name().unwrap());
-            ssh::run_script(&setup_sessions, &remote_script).await?;
+            // let remote_script =
+            //     experiment_directory.join(script.file_name().unwrap());
+            // ssh::run_script(&setup_sessions, &remote_script).await?;
         }
 
         Ok(())
