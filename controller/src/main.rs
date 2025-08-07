@@ -1,5 +1,6 @@
 use std::{
     env,
+    os::unix::fs::PermissionsExt,
     path::PathBuf,
     sync::{atomic::Ordering, Arc},
 };
@@ -176,6 +177,10 @@ async fn upload(mut multipart: Multipart) -> Result<(), String> {
     );
     std::fs::create_dir_all(dir).expect("Failed to create directory");
     std::fs::write(&path, file.unwrap()).expect("Failed to write file to disk");
+    // We want to make sure our files are executable
+    let mut perms = std::fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&path, perms).unwrap();
     info!("Saved file {:?} to {:?}", path.file_name().unwrap(), path);
 
     Ok(())
