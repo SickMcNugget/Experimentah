@@ -1,7 +1,7 @@
 use crate::parse::{
     Experiment, ExperimentRuns, Exporter, Host, RemoteExecution,
 };
-use crate::{time_since_epoch, EXPORTER_DIR, REMOTE_DIR};
+use crate::{time_since_epoch, variation_dir_parts, EXPORTER_DIR, REMOTE_DIR};
 
 const MAX_EXPERIMENTS: usize = 32;
 const RUN_POLL_SLEEP: Duration = Duration::from_millis(250);
@@ -232,13 +232,13 @@ impl ExperimentRunner {
                     self.update_current_experiment(experiment, run).await;
                     ssh::make_directory(&sessions, variation_directory).await?;
 
-                    Self::start_exporters(
-                        &sessions,
-                        &experiment.exporters,
-                        &experiment_directory,
-                        variation_directory,
-                    )
-                    .await?;
+                    // Self::start_exporters(
+                    //     &sessions,
+                    //     &experiment.exporters,
+                    //     &experiment_directory,
+                    //     variation_directory,
+                    // )
+                    // .await?;
 
                     // TODO(joren): We want to make sure that our setup/teardown
                     // is run from the *variation* directory, and not the experiment
@@ -278,14 +278,8 @@ impl ExperimentRunner {
                     .await?;
                     info!("Variation teardown complete");
 
-                    Self::collect_results(
-                        &sessions,
-                        variation_directory,
-                        ts,
-                        run,
-                        &experiment.name,
-                    )
-                    .await?;
+                    Self::collect_results(&sessions, variation_directory)
+                        .await?;
                 }
             }
             info!("Finished experiments");
@@ -467,31 +461,25 @@ impl ExperimentRunner {
     async fn collect_results(
         sessions: &Sessions,
         variation_directory: &Path,
-        timestamp: u128,
-        run_number: u16,
-        experiment_name: &str,
     ) -> Result<()> {
-        use std::path::PathBuf;
-        use log::info;
+        let (experiment_name, run, ts) =
+            variation_dir_parts(variation_directory);
 
         info!(
             "Collecting results for experiment '{}' (repeat {})",
-            experiment_name, run_number
+            experiment_name, run
         );
 
         let local_results_dir = std::path::absolute(PathBuf::from(format!(
             "{}/{}/{}/{}/{}",
-            STORAGE_DIR, RESULTS_DIR, timestamp, run_number, experiment_name
+            STORAGE_DIR, RESULTS_DIR, ts, run, experiment_name
         )))
-        .map_err(|e| RuntimeError::from((
-            "Failed to canonicalize local results dir".to_string(),
-            e,
-        )))?;
-
-        std::fs::create_dir_all(&local_results_dir).map_err(|e| RuntimeError::from((
-            "Failed to create local results directory".to_string(),
-            e,
-        )))?;
+        .map_err(|e| {
+            RuntimeError::from((
+                "Failed to canonicalize local results dir".to_string(),
+                e,
+            ))
+        })?;
 
         ssh::download(sessions, &[variation_directory], &local_results_dir)
             .await?;
@@ -588,7 +576,7 @@ impl ExperimentRunner {
 /// each and every variation.
 /// Setup and teardown cannot be varied, and the current recommendation is that
 /// another experiment configuration be made if these need to be changed.
-pub async fn run_experiments() {}
+// pub async fn run_experiments() {}
 // pub async fn run_experiments(&self) -> Result<Vec<String>, Box<dyn Error>> {
 //     let mut successful_experiments = Vec::new();
 //

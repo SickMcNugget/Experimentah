@@ -290,7 +290,8 @@ pub async fn download(
         .map(|p| p.to_string_lossy().to_string())
         .collect();
     let params = (remote_args, local_destination.to_path_buf());
-    common_async(sessions, do_scp_download, params).await
+    common_async(sessions, do_scp_download, params).await?;
+    Ok(())
 }
 
 // TODO(jackson): maybe just make the do_scp function work for upload and download?
@@ -321,8 +322,10 @@ async fn do_scp_download(
     if !output.status.success() {
         let status_code = output.status.code();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        let msg = format!("Failed to scp download from host {host} -> {}",
-            local_destination_dir.to_string_lossy());
+        let msg = format!(
+            "Failed to scp download from host {host} -> {}",
+            local_destination_dir.to_string_lossy()
+        );
         Err((msg, stderr, status_code))?;
     }
 
