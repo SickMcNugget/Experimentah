@@ -1,5 +1,5 @@
 // use futures_core::stream::Stream;
-use openssh::KnownHosts;
+use openssh::{Child, KnownHosts};
 use openssh_sftp_client::{Sftp, SftpOptions};
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -7,11 +7,14 @@ use std::path::{Path, PathBuf};
 use std::collections::HashMap;
 use std::string::FromUtf8Error;
 use std::sync::Arc;
+use std::thread::spawn;
 use std::{fmt, io};
 use tokio::task::{self};
 
 use crate::INTERPRETER;
 
+pub type BackgroundProcess = Child<Arc<openssh::Session>>;
+pub type BackgroundProcesses = Vec<BackgroundProcess>;
 pub type Session = Arc<SFTPSession>;
 pub type Sessions = HashMap<String, Session>;
 
@@ -19,13 +22,16 @@ pub type Result<T> = std::result::Result<T, SSHError>;
 
 #[derive(Debug)]
 pub struct SFTPSession {
-    session: openssh::Session,
+    session: Arc<openssh::Session>,
     sftp: Sftp,
 }
 
 impl SFTPSession {
     fn new(session: openssh::Session, sftp: Sftp) -> Self {
-        Self { session, sftp }
+        Self {
+            session: Arc::new(session),
+            sftp,
+        }
     }
 }
 
@@ -240,7 +246,13 @@ pub async fn upload(
 
     let params = (command, destination_path.to_path_buf());
 
-    common_async(sessions, do_scp, params).await
+    // TODO(joren): it might be worth *not* ignoring the output return
+    // We could even write this to file as needed.
+    // IMPORTANT NOTE: I think that we're currently streaming all this output
+    // over the network. Might not be such a great idea.
+    common_async(sessions, do_scp, params).await?;
+
+    Ok(())
 }
 
 async fn do_scp(
@@ -256,6 +268,30 @@ async fn do_scp(
         .output()
         .await
         .map_err(SSHError::from)
+}
+
+// TODO(joren): Change result so that it links to the started process
+pub async fn run_background_command(
+    sessions: &Sessions,
+    command_args: &[String],
+) -> Result<BackgroundProcesses> {
+    command_check(command_args)?;
+
+    let params = command_args.to_vec();
+    common_async(sessions, remote_background_command, params).await
+}
+
+pub async fn run_background_command_at(
+    sessions: &Sessions,
+    command_args: &[String],
+    directory: &Path,
+) -> Result<BackgroundProcesses> {
+    let cd_command = cd_command(directory);
+    let command_args: Vec<String> =
+        cd_command.iter().chain(command_args).cloned().collect();
+
+    let params = command_args.to_vec();
+    common_async(sessions, remote_background_command, params).await
 }
 
 // pub async fn run_background_command(sessions: &Sessions, command_args: &[String]) -> Result<()> {
@@ -323,20 +359,28 @@ pub async fn run_command(
     sessions: &Sessions,
     command_args: &[String],
 ) -> Result<()> {
-    if command_args.is_empty() {
+    command_check(command_args)?;
+
+    let params = command_args.to_vec();
+    // TODO(joren): Do something with the return Output type
+    common_async(sessions, remote_command, params).await?;
+
+    Ok(())
+}
+
+fn command_check(command: &[String]) -> Result<()> {
+    if command.is_empty() {
         Err(SSHError::StateError(
             "No command was supplied when trying to run a command remotely"
                 .to_string(),
         ))?;
     }
-
-    let params = command_args.to_vec();
-    common_async(sessions, remote_command, params).await
+    Ok(())
 }
 
 async fn remote_command(
     host: String,
-    session: Arc<SFTPSession>,
+    session: Session,
     command_args: Vec<String>,
 ) -> Result<()> {
     let command_c = command_args.first().unwrap();
@@ -364,6 +408,28 @@ async fn remote_command(
         }
     }
     Ok(())
+}
+
+async fn remote_background_command(
+    host: String,
+    session: Session,
+    command_args: Vec<String>,
+) -> Result<Child<Arc<openssh::Session>>> {
+    let command_c = command_args.first().unwrap();
+    let command_args_c = command_args.join(" ");
+
+    let err_str = format!(
+        "Failed to run background program '{command_c}' on host '{host}'"
+    );
+
+    session
+        .session
+        .clone()
+        .arc_command(INTERPRETER)
+        .args(["-c", &command_args_c])
+        .spawn()
+        .await
+        .map_err(|e| SSHError::from((err_str, e)))
 }
 
 /// Makes multiple directories at once in parallel across the sessions passed in.
@@ -401,7 +467,7 @@ async fn common_async<T, P, Fut>(
     sessions: &Sessions,
     task_fn: impl Fn(String, Arc<SFTPSession>, P) -> Fut + Send + 'static + Copy,
     params: P,
-) -> Result<()>
+) -> Result<Vec<T>>
 where
     T: Send + 'static,
     Fut: Future<Output = Result<T>> + Send + 'static,
@@ -427,15 +493,12 @@ where
         }));
     }
 
+    let mut results = vec![];
     for task in tasks.into_iter() {
-        // The extra await was added by the fact that we now have to Box
-        // our future since it can return generic types
-        // A small price to pay for more dynamic functionality
-        let _res = task.await??;
-        // TODO(joren): Add a way to play with return results here
+        results.push(task.await??);
     }
 
-    Ok(())
+    Ok(results)
 }
 
 /// Note that the script in question is run remotely,

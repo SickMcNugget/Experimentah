@@ -1,4 +1,6 @@
-use crate::parse::{Experiment, ExperimentRuns, Host, RemoteExecution};
+use crate::parse::{
+    Experiment, ExperimentRuns, Exporter, Host, RemoteExecution,
+};
 use crate::{time_since_epoch, EXPORTER_DIR, REMOTE_DIR};
 
 const MAX_EXPERIMENTS: usize = 32;
@@ -218,20 +220,24 @@ impl ExperimentRunner {
 
             for run in 1..=runs {
                 self.current_run.store(run, Ordering::Relaxed);
-                let variation_directory: &Path =
+
+                let repeat_directory: &Path =
                     &experiment_directory.join(run.to_string());
 
                 for experiment in experiments.iter() {
-                    self.update_current_experiment(experiment, run).await;
+                    let variation_directory: &Path =
+                        &repeat_directory.join(experiment.name.to_string());
 
+                    self.update_current_experiment(experiment, run).await;
                     ssh::make_directory(&sessions, variation_directory).await?;
 
-                    // Self::start_exporters(
-                    //     &sessions,
-                    //     &experiment.exporters,
-                    //     experiment_directory,
-                    // )
-                    // .await?;
+                    Self::start_exporters(
+                        &sessions,
+                        &experiment.exporters,
+                        &experiment_directory,
+                        variation_directory,
+                    )
+                    .await?;
 
                     // TODO(joren): We want to make sure that our setup/teardown
                     // is run from the *variation* directory, and not the experiment
@@ -327,57 +333,80 @@ impl ExperimentRunner {
         files
     }
 
-    // async fn start_exporters(
-    //     sessions: &Sessions,
-    //     exporters: &[Exporter],
-    //     experiment_directory: &Path,
-    // ) -> Result<()> {
-    //     for exporter in exporters.iter() {
-    //         let exporter_sessions =
-    //             Self::filter_host_sessions(sessions, &exporter.hosts);
-    //
-    //         for setup in exporter.setup.iter() {
-    //             // TODO(joren): Handle shlex error
-    //             let setup_comm = shlex::split(setup).unwrap();
-    //             ssh::run_command_silent_at(
-    //                 &exporter_sessions,
-    //                 &setup_comm,
-    //                 experiment_directory,
-    //             )
-    //             .await?;
-    //         }
-    //
-    //         //TODO(joren): Error check split
-    //         let comm = shlex::split(&exporter.command).unwrap();
-    //
-    //         // The exporter needs a file to be created which we can refer to in the event
-    //         // of an experimentah crash.
-    //         // We can make use of the flock command when running our exporters
-    //         // match ssh::run_background_command(&exporter_sessions, &comm).await {
-    //         //     Ok(child) => info!("Started exporter '{}'", exporter.name),
-    //         //     Err(e) => {
-    //         //         error!(
-    //         //             "Failed to start exporter '{}': {}",
-    //         //             exporter.name, e
-    //         //         )
-    //         //     }
-    //         // }
-    //
-    //         ssh::run_command(&exporter_sessions, &comm).await?;
-    //         info!("Started exporter '{}'", exporter.name);
-    //         // match ssh::run_command(&exporter_sessions, &comm).await {
-    //         //     Ok(()) => info!("Started exporter '{}'", exporter.name),
-    //         //     Err(e) => {
-    //         //         error!(
-    //         //             "Failed to start exporter '{}': {}",
-    //         //             exporter.name, e
-    //         //         )
-    //         //     }
-    //         // }
-    //     }
-    //     Ok(())
-    // }
+    /// This function starts long-running exporters, returning a handle
+    /// to them so that they can be sent an interrupt signal when they
+    /// are no longer required.
+    async fn start_exporters(
+        sessions: &Sessions,
+        exporters: &[Exporter],
+        _experiment_directory: &Path,
+        variation_directory: &Path,
+    ) -> Result<()> {
+        for exporter in exporters.iter() {
+            let exporter_sessions =
+                Self::filter_host_sessions(sessions, &exporter.hosts);
 
+            // TODO(joren): It's okay now since we're early in development to do this serially, but
+            // ideally in the future the setup process should be done in parallel, if possible.
+
+            for setup in exporter.setup.iter() {
+                // TODO(joren): Handle shlex error
+                let setup_comm = shlex::split(setup).unwrap();
+                ssh::run_command_at(
+                    &exporter_sessions,
+                    &setup_comm,
+                    variation_directory,
+                )
+                .await?;
+            }
+
+            //TODO(joren): Handle shlex error
+            let comm = shlex::split(&exporter.command).unwrap();
+
+            // This process should link us to the exporter that was started remotely
+            let running_exporters = ssh::run_background_command_at(
+                &exporter_sessions,
+                &comm,
+                variation_directory,
+            )
+            .await?;
+
+            info!("Started exporter '{}'", exporter.name);
+            dbg!(running_exporters);
+
+            tokio::time::sleep(Duration::from_secs(60)).await;
+
+            // The exporter needs a file to be created which we can refer to in the event
+            // of an experimentah crash.
+            // We can make use of the flock command when running our exporters
+            // match ssh::run_background_command(&exporter_sessions, &comm).await {
+            //     Ok(child) => info!("Started exporter '{}'", exporter.name),
+            //     Err(e) => {
+            //         error!(
+            //             "Failed to start exporter '{}': {}",
+            //             exporter.name, e
+            //         )
+            //     }
+            // }
+
+            // ssh::run_command(&exporter_sessions, &comm).await?;
+            // match ssh::run_command(&exporter_sessions, &comm).await {
+            //     Ok(()) => info!("Started exporter '{}'", exporter.name),
+            //     Err(e) => {
+            //         error!(
+            //             "Failed to start exporter '{}': {}",
+            //             exporter.name, e
+            //         )
+            //     }
+            // }
+        }
+        Ok(())
+    }
+
+    //TODO(joren): We need remote commands to write their outputs to a file somewhere.
+    //This is so we can retrieve the information on the client if desired.
+    //It's important to remember that we want to avoid streaming as much as possible
+    //unless the client specifically requests it for debug purposes.
     async fn run_remote_executions(
         sessions: &Sessions,
         remote_executions: &[RemoteExecution],
