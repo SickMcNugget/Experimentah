@@ -1,4 +1,7 @@
-use std::time::{Duration, SystemTime, SystemTimeError, UNIX_EPOCH};
+use std::{
+    path::Path,
+    time::{Duration, SystemTime, SystemTimeError, UNIX_EPOCH},
+};
 
 pub mod db;
 pub mod parse;
@@ -59,4 +62,35 @@ pub const DATABASE_NAME: &str = "experimentah";
 
 fn time_since_epoch() -> Result<Duration, SystemTimeError> {
     SystemTime::now().duration_since(UNIX_EPOCH)
+}
+
+/// This function converts a path of format:
+/// <PREFIX>/<TIMESTAMP>/<RUN>/<NAME> into
+/// (<NAME>, <RUN>, <TIMESTAMP>)
+fn variation_dir_parts(variation_directory: &Path) -> (String, u16, u128) {
+    let experiment_name = variation_directory
+        .file_name()
+        .expect("Variation directory did not contain an experiment name")
+        .to_string_lossy()
+        .to_string();
+    let run: u16 = variation_directory
+        .parent()
+        .unwrap()
+        .file_name()
+        .expect("Variation directory did not contain a run number")
+        .to_string_lossy()
+        .parse()
+        .expect("Run number was not a valid u16");
+    let ts = variation_directory
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .file_name()
+        .expect("Variation directory did not contain a timestamp")
+        .to_string_lossy()
+        .parse()
+        .expect("Timestamp was not a valid u128 (milliseconds)");
+
+    (experiment_name, run, ts)
 }
