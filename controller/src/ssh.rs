@@ -263,11 +263,70 @@ async fn do_scp(
     let (mut command, destination_path) = params;
     command.push(format!("{host}:{}", destination_path.to_string_lossy()));
 
-    tokio::process::Command::new(command.first().unwrap())
+    let output = tokio::process::Command::new(command.first().unwrap())
         .args(&command[1..])
         .output()
         .await
-        .map_err(SSHError::from)
+        .map_err(SSHError::from)?;
+
+    if !output.status.success() {
+        let status_code = output.status.code();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let msg = format!("Failed to scp upload to host {host}");
+        Err((msg, stderr, status_code))?;
+    }
+
+    Ok(output)
+}
+
+/// Used to download a directory from each remote host into a local experiment results directory.
+pub async fn download(
+    sessions: &Sessions,
+    remote_paths: &[&Path],
+    local_destination: &Path,
+) -> Result<()> {
+    let remote_args: Vec<String> = remote_paths
+        .iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
+    let params = (remote_args, local_destination.to_path_buf());
+    common_async(sessions, do_scp_download, params).await
+}
+
+// TODO(jackson): maybe just make the do_scp function work for upload and download?
+async fn do_scp_download(
+    host: String,
+    _: Session,
+    params: (Vec<String>, PathBuf),
+) -> Result<std::process::Output> {
+    let (remote_paths, local_destination) = params;
+
+    // Ensure the local destination directory exists for this host
+    let local_destination_dir = local_destination.join(&host);
+    std::fs::create_dir_all(&local_destination_dir).map_err(SSHError::from)?;
+
+    let mut command: Vec<String> = vec!["scp".into(), "-r".into()];
+    for rp in remote_paths.iter() {
+        // Add /* to copy contents of directory, not the directory itself
+        command.push(format!("{host}:{}/*", rp));
+    }
+    command.push(local_destination_dir.to_string_lossy().to_string());
+
+    let output = tokio::process::Command::new(command.first().unwrap())
+        .args(&command[1..])
+        .output()
+        .await
+        .map_err(SSHError::from)?;
+
+    if !output.status.success() {
+        let status_code = output.status.code();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let msg = format!("Failed to scp download from host {host} -> {}",
+            local_destination_dir.to_string_lossy());
+        Err((msg, stderr, status_code))?;
+    }
+
+    Ok(output)
 }
 
 // TODO(joren): Change result so that it links to the started process

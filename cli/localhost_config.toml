@@ -1,0 +1,18 @@
+[[hosts]]
+name = "runner1"
+address = "localhost"
+infrastructure = "linux"
+
+[[exporters]]
+name = "test-exporter"
+hosts = ["runner1"]
+# this should not run for a fixed run time, it should be ended when the experiment is ended
+# this is just for testing results collection
+command = "sar -o sar_output.bin 1 10"
+setup = ["dnf install -y sysstat", "apt install -y sysstat"]
+kind = "node"
+[[exporters]]
+name = "another-test-exporter"
+hosts = ["runner1"]
+command = "my_collector"
+kind = "node"

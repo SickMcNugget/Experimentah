@@ -16,6 +16,7 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 
 use crate::ssh::{self, Sessions};
+use crate::{RESULTS_DIR, STORAGE_DIR};
 
 type Result<T> = std::result::Result<T, RuntimeError>;
 
@@ -276,6 +277,15 @@ impl ExperimentRunner {
                     )
                     .await?;
                     info!("Variation teardown complete");
+
+                    Self::collect_results(
+                        &sessions,
+                        variation_directory,
+                        ts,
+                        run,
+                        &experiment.name,
+                    )
+                    .await?;
                 }
             }
             info!("Finished experiments");
@@ -450,6 +460,41 @@ impl ExperimentRunner {
             //     experiment_directory.join(script.file_name().unwrap());
             // ssh::run_script(&setup_sessions, &remote_script).await?;
         }
+
+        Ok(())
+    }
+
+    async fn collect_results(
+        sessions: &Sessions,
+        variation_directory: &Path,
+        timestamp: u128,
+        run_number: u16,
+        experiment_name: &str,
+    ) -> Result<()> {
+        use std::path::PathBuf;
+        use log::info;
+
+        info!(
+            "Collecting results for experiment '{}' (repeat {})",
+            experiment_name, run_number
+        );
+
+        let local_results_dir = std::path::absolute(PathBuf::from(format!(
+            "{}/{}/{}/{}/{}",
+            STORAGE_DIR, RESULTS_DIR, timestamp, run_number, experiment_name
+        )))
+        .map_err(|e| RuntimeError::from((
+            "Failed to canonicalize local results dir".to_string(),
+            e,
+        )))?;
+
+        std::fs::create_dir_all(&local_results_dir).map_err(|e| RuntimeError::from((
+            "Failed to create local results directory".to_string(),
+            e,
+        )))?;
+
+        ssh::download(sessions, &[variation_directory], &local_results_dir)
+            .await?;
 
         Ok(())
     }
