@@ -2,6 +2,7 @@ use std::{
     env,
     os::unix::fs::PermissionsExt,
     path::PathBuf,
+    str::FromStr,
     sync::{atomic::Ordering, Arc},
 };
 
@@ -13,7 +14,7 @@ use axum::{
 };
 
 use controller::{
-    parse::{self, Config, ExperimentConfig, ParseError},
+    parse::{self, Config, ExperimentConfig, FileType, ParseError},
     run::ExperimentRunner,
 };
 
@@ -154,14 +155,12 @@ async fn upload(mut multipart: Multipart) -> Result<(), String> {
     while let Some(field) = multipart.next_field().await.unwrap() {
         let name = field.name().expect("No name sent as part of multipart");
         match name {
-            "type" => match field.text().await.unwrap().as_str() {
-                "setup" => path.push("setup"),
-                "teardown" => path.push("teardown"),
-                "execute" => path.push("execute"),
-                _ => {
-                    panic!("Invalid file type received in upload");
-                }
-            },
+            "type" => {
+                let ft =
+                    FileType::from_str(field.text().await.unwrap().as_str())
+                        .unwrap();
+                path.push(ft.to_string());
+            }
             "file" => {
                 path.push(field.file_name().unwrap());
                 file = Some(field.bytes().await.unwrap());

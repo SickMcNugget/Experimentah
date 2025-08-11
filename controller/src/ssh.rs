@@ -7,7 +7,6 @@ use std::path::{Path, PathBuf};
 use std::collections::HashMap;
 use std::string::FromUtf8Error;
 use std::sync::Arc;
-use std::thread::spawn;
 use std::{fmt, io};
 use tokio::task::{self};
 
@@ -476,7 +475,7 @@ async fn remote_background_command(
     host: String,
     session: Session,
     command_args: Vec<String>,
-) -> Result<Child<Arc<openssh::Session>>> {
+) -> Result<BackgroundProcess> {
     let command_c = command_args.first().unwrap();
     let command_args_c = command_args.join(" ");
 

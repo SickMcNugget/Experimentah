@@ -16,6 +16,7 @@ pub mod ssh;
 /// - storage/execute - Contains execute scripts
 /// - storage/results - Contains collected results
 /// - storage/exporters - Contains exporter binaries
+/// - storage/dependencies - Contains script dependencies
 ///
 /// Some important files are:
 /// - storage/<DATABASE>

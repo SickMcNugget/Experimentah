@@ -10,12 +10,12 @@
 //  b. Tries to upload collected results (if the error was with repo node)
 //  c. Dies
 
-use std::env;
 use std::path::PathBuf;
+use std::{env, str::FromStr};
 
 use clap::{Args, Parser};
 
-use controller::parse::{Config, ExperimentConfig};
+use controller::parse::{Config, ExperimentConfig, FileType};
 
 use reqwest::blocking::{multipart, Client};
 
@@ -175,12 +175,12 @@ fn validate_configs(
 /// on the part of the user.
 ///     1. If a file contains setup/teardown, then it is probably a setup/teardown script.
 ///     2. If they do not pass in a type (setup/teardown/execute), it will be treated as an execution script.
-fn parse_upload(s: &str) -> Result<(PathBuf, String), String> {
+fn parse_upload(s: &str) -> Result<(PathBuf, FileType), String> {
     let s = s.trim().replace("  ", " ");
     let parts: Vec<&str> = s.splitn(2, " ").collect();
 
     let filepath: PathBuf;
-    let filetype: String;
+    let filetype: FileType;
 
     match parts.len() {
         0 => return Err("No file passed in".to_string()),
@@ -188,32 +188,15 @@ fn parse_upload(s: &str) -> Result<(PathBuf, String), String> {
             filepath = PathBuf::from(parts[0])
                 .canonicalize()
                 .expect("Unable to canonicalize filepath");
-            let filename = filepath
-                .file_name()
-                .expect("An uploaded file should have a basename")
-                .to_string_lossy();
 
-            if filename.contains("setup") {
-                filetype = "setup".to_string();
-            } else if filename.contains("teardown") {
-                filetype = "teardown".to_string();
-            } else {
-                filetype = "execute".to_string();
-            }
+            filetype = FileType::try_from(filepath.as_path()).unwrap();
         }
         2 => {
             filepath = PathBuf::from(parts[0])
                 .canonicalize()
                 .expect("Unable to canonicalize filepath");
 
-            match parts[1] {
-                "setup" | "teardown" | "execute" => {
-                    filetype = parts[1].to_string();
-                }
-                _ => {
-                    return Err("Invalid file type requested".to_string());
-                }
-            }
+            filetype = FileType::from_str(parts[1]).unwrap();
         }
         _ => {
             panic!("We should not have received a parts vector with more than 2 members");
@@ -225,11 +208,11 @@ fn parse_upload(s: &str) -> Result<(PathBuf, String), String> {
 fn upload_data(
     client: &Client,
     address: &str,
-    blobs: Vec<(PathBuf, String)>,
+    blobs: Vec<(PathBuf, FileType)>,
 ) -> Result<(), CliError> {
     for (filepath, filetype) in blobs.into_iter() {
         let form = multipart::Form::new()
-            .text("type", filetype)
+            .text("type", filetype.to_string())
             .file("file", filepath)?;
 
         let response = client
@@ -384,5 +367,5 @@ struct ExecutionPathway {
     #[arg(short, long)]
     status: bool,
     #[arg(short, long, value_delimiter = ',', value_parser = parse_upload)]
-    upload: Vec<(PathBuf, String)>,
+    upload: Vec<(PathBuf, FileType)>,
 }

@@ -6,7 +6,7 @@ use crate::{time_since_epoch, variation_dir_parts, EXPORTER_DIR, REMOTE_DIR};
 const MAX_EXPERIMENTS: usize = 32;
 const RUN_POLL_SLEEP: Duration = Duration::from_millis(250);
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 // use reqwest::Client;
 use log::{error, info};
@@ -15,10 +15,11 @@ use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 use tokio::sync::Mutex;
 
-use crate::ssh::{self, Sessions};
+use crate::ssh::{self, BackgroundProcesses, Sessions};
 use crate::{RESULTS_DIR, STORAGE_DIR};
 
 type Result<T> = std::result::Result<T, RuntimeError>;
+type Exporters = HashMap<String, BackgroundProcesses>;
 
 #[derive(Debug)]
 pub enum RuntimeError {
@@ -61,6 +62,12 @@ impl std::error::Error for RuntimeError {
             // RuntimeError::BadStatusCode(..) => None,
             RuntimeError::Generic(..) => None,
         }
+    }
+}
+
+impl From<std::io::Error> for RuntimeError {
+    fn from(value: std::io::Error) -> Self {
+        RuntimeError::IOError("I/O error".to_string(), value)
     }
 }
 
@@ -219,6 +226,11 @@ impl ExperimentRunner {
             let files = Self::unique_files_for_all_experiments(&experiments);
             ssh::upload(&sessions, &files, &experiment_directory).await?;
 
+            // TODO(joren): For dependencies, the current solution is to upload them normally, and
+            // then adjust them afterwards to be in the correct subdirectory. It's definitely dumb
+            // to do it this way but it's the path of least resistance at the moment.
+            // Self::correct_dependencies(&sessions, &experiment)
+
             for run in 1..=runs {
                 self.current_run.store(run, Ordering::Relaxed);
 
@@ -227,18 +239,18 @@ impl ExperimentRunner {
 
                 for experiment in experiments.iter() {
                     let variation_directory: &Path =
-                        &repeat_directory.join(experiment.name.to_string());
+                        &repeat_directory.join(&experiment.name);
 
                     self.update_current_experiment(experiment, run).await;
                     ssh::make_directory(&sessions, variation_directory).await?;
 
-                    // Self::start_exporters(
-                    //     &sessions,
-                    //     &experiment.exporters,
-                    //     &experiment_directory,
-                    //     variation_directory,
-                    // )
-                    // .await?;
+                    let _exporters = Self::start_exporters(
+                        &sessions,
+                        &experiment.exporters,
+                        &experiment_directory,
+                        variation_directory,
+                    )
+                    .await?;
 
                     // TODO(joren): We want to make sure that our setup/teardown
                     // is run from the *variation* directory, and not the experiment
@@ -322,6 +334,18 @@ impl ExperimentRunner {
         hosts
     }
 
+    // fn dependencies(sessions: &Sessions, experiment: Experiment, experiment_directory: &Path) {
+    //     let execute = &experiment.execute;
+    //     let fname = execute.scripts.first().unwrap().file_name().unwrap().to_string_lossy();
+    //     let execute_dir = execute.scripts.first().unwrap().set_file_name(format!("{fname}-deps"));
+    //
+    //     let command_args = vec![];
+    //     ssh::run_command_at(sessions, command_args, experiment_directory)
+    //     let deps = &experiment.dependencies;
+    //
+    //     deps.iter().
+    // }
+
     /// Loops through a slice of experiments and returns
     /// unique filepaths for that slice.
     fn unique_files_for_all_experiments(
@@ -337,15 +361,16 @@ impl ExperimentRunner {
         files
     }
 
-    /// This function starts long-running exporters, returning a handle
-    /// to them so that they can be sent an interrupt signal when they
-    /// are no longer required.
+    /// Starts long-running exporters, which are expected to collect
+    /// system-level metrics whilst an experiment is running.
+    /// Think tools 'sar' or 'ipmitool'
     async fn start_exporters(
         sessions: &Sessions,
         exporters: &[Exporter],
         _experiment_directory: &Path,
         variation_directory: &Path,
-    ) -> Result<()> {
+    ) -> Result<Exporters> {
+        let mut live_exporters: Exporters = Exporters::default();
         for exporter in exporters.iter() {
             let exporter_sessions =
                 Self::filter_host_sessions(sessions, &exporter.hosts);
@@ -368,17 +393,26 @@ impl ExperimentRunner {
             let comm = shlex::split(&exporter.command).unwrap();
 
             // This process should link us to the exporter that was started remotely
-            let running_exporters = ssh::run_background_command_at(
+            // let running_exporters = ssh::run_background_command_at(
+            //     &exporter_sessions,
+            //     &comm,
+            //     variation_directory,
+            // )
+            // .await?;
+            let exporter_processes = ssh::run_background_command_at(
                 &exporter_sessions,
                 &comm,
                 variation_directory,
             )
             .await?;
 
-            info!("Started exporter '{}'", exporter.name);
-            dbg!(running_exporters);
+            live_exporters.insert(exporter.name.clone(), exporter_processes);
+            // tokio::time::sleep(Duration::from_secs(5)).await;
 
-            tokio::time::sleep(Duration::from_secs(60)).await;
+            // info!("Started exporter '{}'", exporter.name);
+            // dbg!(running_exporters);
+
+            // tokio::time::sleep(Duration::from_secs(60)).await;
 
             // The exporter needs a file to be created which we can refer to in the event
             // of an experimentah crash.
@@ -404,7 +438,7 @@ impl ExperimentRunner {
             //     }
             // }
         }
-        Ok(())
+        Ok(live_exporters)
     }
 
     //TODO(joren): We need remote commands to write their outputs to a file somewhere.

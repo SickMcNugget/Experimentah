@@ -178,12 +178,12 @@ impl FromStr for Config {
 }
 
 impl Config {
-    pub fn from_file(file: &Path) -> Result<Self> {
-        let config_str = std::fs::read_to_string(file)
+    pub fn from_file<P: AsRef<Path>>(file: P) -> Result<Self> {
+        let config_str = std::fs::read_to_string(file.as_ref())
             .map_err(|e| ParseError::from(("error reading config file", e)))?;
         Config::parse_toml(&config_str).map_err(|e| {
             ParseError::from((
-                format!("Error in config file {}", file.to_string_lossy()),
+                format!("Error in config file {}", file.as_ref().display()),
                 e,
             ))
         })
@@ -195,19 +195,6 @@ impl Config {
         Ok(config)
     }
 
-    // pub fn brain_endpoint(&self) -> String {
-    //     let host_name = &self.brain.host;
-    //     let url = self
-    //         .hosts
-    //         .iter()
-    //         .find(|host| host.name == *host_name)
-    //         .map(|host| &host.address)
-    //         .expect("Couldn't find brain host in config: {host_name}");
-    //     let port = &self.brain.port;
-    //
-    //     format!("http://{}:{}", url, port)
-    // }
-
     pub fn host_endpoints(&self) -> Vec<String> {
         self.hosts.iter().map(|host| host.address.clone()).collect()
     }
@@ -216,8 +203,6 @@ impl Config {
         for host in self.hosts.iter() {
             host.validate()?;
         }
-
-        // self.brain.validate(&self.hosts)?;
 
         for exporter in self.exporters.iter() {
             exporter.validate(&self.hosts)?;
@@ -246,25 +231,9 @@ impl HostConfig {
     }
 }
 
-// #[derive(Serialize, Deserialize, PartialEq, Debug)]
-// pub struct RunnerConfig {
-//     pub name: String,
-//     pub host: String,
-// }
-//
-// impl RunnerConfig {
-//     fn validate(&self, hosts: &[HostConfig]) -> Result<()> {
-//         // Ensure the hosts exist
-//         hosts.iter().find(|host| host.name == self.host).ok_or(
-//             ParseError::ValidationError(format!(
-//                 "The host for runner {} must be defined: {}",
-//                 self.name, self.host
-//             )),
-//         )?;
-//         Ok(())
-//     }
-// }
-
+//TODO(joren): Exporters should follow similar rules to normal execution.
+//Either a command or a file should be usable, it's the 21st century.
+//Don't waste time on that now, though
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
 pub struct ExporterConfig {
     pub name: String,
@@ -317,6 +286,8 @@ pub struct ExperimentConfig {
     pub kind: String,
     pub execute: PathBuf,
     #[serde(default)]
+    pub dependencies: Vec<PathBuf>,
+    #[serde(default)]
     pub arguments: Vec<String>,
     pub expected_arguments: Option<usize>,
     #[serde(default = "ExperimentConfig::default_runs")]
@@ -342,9 +313,9 @@ impl FromStr for ExperimentConfig {
 }
 
 impl ExperimentConfig {
-    pub fn from_file(file: &Path) -> Result<Self> {
-        let experiment_config_str =
-            std::fs::read_to_string(file).map_err(|e| {
+    pub fn from_file<P: AsRef<Path>>(file: P) -> Result<Self> {
+        let experiment_config_str = std::fs::read_to_string(file.as_ref())
+            .map_err(|e| {
                 ParseError::from(("error reading experiment config file", e))
             })?;
 
@@ -352,7 +323,7 @@ impl ExperimentConfig {
             ParseError::from((
                 format!(
                     "Error in experiment config file {}",
-                    file.to_string_lossy()
+                    file.as_ref().display()
                 ),
                 e,
             ))
@@ -387,36 +358,34 @@ impl ExperimentConfig {
         Ok(())
     }
 
+    /// NOTE: This function is always called BEFORE we generate experiments from the configuration,
+    /// therefore all paths must be remapped correctly within this function
     pub fn validate_files(&self) -> Result<()> {
-        check_file_exists(&map_remote_execution_script(
-            &self.execute,
-            &RemoteExecutionType::Execute,
-        )?)
-        .map_err(|e| {
-            ParseError::from((
-                format!("Missing files for experiment '{}'", self.name),
-                e,
-            ))
-        })?;
+        check_file_exists(&remap_filepath(&self.execute, &FileType::Execute)?)
+            .map_err(|e| {
+                ParseError::from((
+                    format!("Missing files for experiment '{}'", self.name),
+                    e,
+                ))
+            })?;
+
+        validate_files(&self.dependencies, &FileType::Dependency)?;
 
         for setup in self.setup.iter() {
-            setup
-                .validate_files(&RemoteExecutionType::Setup)
-                .map_err(|e| {
-                    ParseError::from((
-                        format!(
-                            "Missing files in setup for experiment '{}'",
-                            &self.name
-                        ),
-                        e,
-                    ))
-                })?;
+            validate_files(&setup.scripts, &FileType::Setup).map_err(|e| {
+                ParseError::from((
+                    format!(
+                        "Missing files in setup for experiment '{}'",
+                        &self.name
+                    ),
+                    e,
+                ))
+            })?;
         }
 
         for teardown in self.teardown.iter() {
-            teardown
-                .validate_files(&RemoteExecutionType::Teardown)
-                .map_err(|e| {
+            validate_files(&teardown.scripts, &FileType::Teardown).map_err(
+                |e| {
                     ParseError::from((
                         format!(
                             "Missing files in teardown for experiment '{}'",
@@ -424,7 +393,8 @@ impl ExperimentConfig {
                         ),
                         e,
                     ))
-                })?;
+                },
+            )?;
         }
 
         Ok(())
@@ -607,21 +577,17 @@ impl RemoteExecutionConfig {
     fn validate(&self, config: &Config, experiment_name: &str) -> Result<()> {
         hosts_check(&config.hosts, &self.hosts, experiment_name)
     }
+}
 
-    fn validate_files(
-        &self,
-        remote_execution_type: &RemoteExecutionType,
-    ) -> Result<()> {
-        let scripts =
-            map_remote_execution_scripts(self, remote_execution_type)?;
+fn validate_files<P: AsRef<Path>>(
+    files: &[P],
+    file_type: &FileType,
+) -> Result<()> {
+    let scripts = remap_filepaths(files, file_type)?;
 
-        check_files_exist(&scripts).map_err(|e| {
-            ParseError::from((
-                format!("Missing files for {}", remote_execution_type),
-                e,
-            ))
-        })
-    }
+    check_files_exist(&scripts).map_err(|e| {
+        ParseError::from((format!("Missing {} file", file_type), e))
+    })
 }
 
 #[derive(Debug, PartialEq)]
@@ -636,6 +602,7 @@ pub struct Experiment {
     // Note that execute should only contain 1 script.
     // We make it a RemoteExecution for convenience, though
     pub execute: RemoteExecution,
+    pub dependencies: Vec<PathBuf>,
     pub arguments: Vec<String>,
     pub expected_arguments: Option<usize>,
     pub exporters: Vec<Exporter>,
@@ -681,6 +648,7 @@ impl Experiment {
             .chain(self.teardown.iter().flat_map(|teardown| {
                 teardown.scripts.iter().map(|script| script.as_path())
             }))
+            .chain(self.dependencies.iter().map(|script| script.as_path()))
             .collect();
 
         files.sort();
@@ -758,15 +726,11 @@ impl Exporter {
 pub struct RemoteExecution {
     pub hosts: Vec<Host>,
     pub scripts: Vec<PathBuf>,
-    pub re_type: RemoteExecutionType,
+    pub re_type: FileType,
 }
 
 impl RemoteExecution {
-    fn new(
-        hosts: Vec<Host>,
-        scripts: Vec<PathBuf>,
-        re_type: RemoteExecutionType,
-    ) -> Self {
+    fn new(hosts: Vec<Host>, scripts: Vec<PathBuf>, re_type: FileType) -> Self {
         Self {
             hosts,
             scripts,
@@ -792,35 +756,60 @@ impl RemoteExecution {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum RemoteExecutionType {
+pub enum FileType {
     Setup,
     Teardown,
     Execute,
+    Dependency,
 }
 
-impl Display for RemoteExecutionType {
+impl Display for FileType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match *self {
             Self::Setup => write!(f, "setup"),
             Self::Teardown => write!(f, "teardown"),
             Self::Execute => write!(f, "execute"),
+            Self::Dependency => write!(f, "dependency"),
         }
     }
 }
 
-impl FromStr for RemoteExecutionType {
+impl FromStr for FileType {
     type Err = ParseError;
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         let re_type = match s {
             "setup" => Self::Setup,
             "teardown" => Self::Teardown,
             "execute" => Self::Execute,
+            "dependency" => Self::Dependency,
             &_ => Err(ParseError::ValidationError(format!(
                 "Invalid remote execution type, got {s}"
             )))?,
         };
 
         Ok(re_type)
+    }
+}
+
+impl TryFrom<&Path> for FileType {
+    type Error = ParseError;
+    fn try_from(value: &Path) -> std::result::Result<Self, Self::Error> {
+        let filename = value
+            .file_name()
+            .ok_or(ParseError::ValidationError(
+                "Tried to parse a file type from a non-file path".to_string(),
+            ))?
+            .to_string_lossy();
+
+        if filename.contains("setup") {
+            Ok(Self::Setup)
+        } else if filename.contains("teardown") {
+            Ok(Self::Teardown)
+        } else if filename.contains("dependency") {
+            Ok(Self::Dependency)
+        } else {
+            Ok(Self::Execute)
+        }
     }
 }
 
@@ -860,30 +849,33 @@ fn map_exporters(config: &Config, exporters: &[String]) -> Vec<Exporter> {
         .collect()
 }
 
-fn remap_execute(
+fn remap_execute<P: AsRef<Path>>(
     config: &Config,
-    execute: &Path,
+    execute: P,
     hosts: &[String],
 ) -> Result<RemoteExecution> {
     let hosts = map_hosts(config, hosts);
 
     // This is always one script for the execute key
-    let scripts = vec![map_remote_execution_script(
-        execute,
-        &RemoteExecutionType::Execute,
-    )?];
+    let scripts = vec![remap_filepath(execute, &FileType::Execute)?];
 
-    Ok(RemoteExecution::new(
-        hosts,
-        scripts,
-        RemoteExecutionType::Execute,
-    ))
+    Ok(RemoteExecution::new(hosts, scripts, FileType::Execute))
+}
+
+fn remap_dependencies<P: AsRef<Path>>(
+    dependencies: &[P],
+) -> Result<Vec<PathBuf>> {
+    dependencies.iter().map(remap_dependency).collect()
+}
+
+fn remap_dependency<P: AsRef<Path>>(dependency: P) -> Result<PathBuf> {
+    remap_filepath(dependency, &FileType::Dependency)
 }
 
 fn map_remote_executions(
     config: &Config,
     remote_executions: &[RemoteExecutionConfig],
-    remote_execution_type: RemoteExecutionType,
+    remote_execution_type: FileType,
 ) -> Result<Vec<RemoteExecution>> {
     let mut mapped_remote_executions =
         Vec::with_capacity(remote_executions.len());
@@ -891,10 +883,8 @@ fn map_remote_executions(
     for remote_execution in remote_executions.iter() {
         let hosts = map_hosts(config, &remote_execution.hosts);
 
-        let mapped_scripts = map_remote_execution_scripts(
-            remote_execution,
-            &remote_execution_type,
-        )?;
+        let mapped_scripts =
+            remap_filepaths(&remote_execution.scripts, &remote_execution_type)?;
 
         mapped_remote_executions.push(RemoteExecution::new(
             hosts,
@@ -905,29 +895,25 @@ fn map_remote_executions(
     Ok(mapped_remote_executions)
 }
 
-fn map_remote_execution_scripts(
-    remote_execution: &RemoteExecutionConfig,
-    remote_execution_type: &RemoteExecutionType,
+fn remap_filepaths<P: AsRef<Path>>(
+    files: &[P],
+    file_type: &FileType,
 ) -> Result<Vec<PathBuf>> {
-    remote_execution
-        .scripts
+    files
         .iter()
-        .map(|script| {
-            map_remote_execution_script(script, remote_execution_type)
-        })
+        .map(|script| remap_filepath(script, file_type))
         .collect::<Result<Vec<PathBuf>>>()
 }
 
-fn map_remote_execution_script(
-    script: &Path,
-    remote_execution_type: &RemoteExecutionType,
+fn remap_filepath<P: AsRef<Path>>(
+    file: P,
+    file_type: &FileType,
 ) -> Result<PathBuf> {
-    let basename = script.file_name().unwrap_or_else(|| {
-        panic!("The script {:?} should have had a filename", script)
+    let basename = file.as_ref().file_name().unwrap_or_else(|| {
+        panic!("The script {:?} should have had a filename", file.as_ref())
     });
     let new_path =
-        PathBuf::from(format!("{STORAGE_DIR}/{remote_execution_type}"))
-            .join(basename);
+        PathBuf::from(format!("{STORAGE_DIR}/{file_type}")).join(basename);
     Ok(std::path::absolute(new_path)?)
 }
 
@@ -941,6 +927,7 @@ pub fn generate_experiments(
     let description = &experiment_config.description;
     let kind = &experiment_config.kind;
     let execute = &experiment_config.execute;
+    let dependencies = &experiment_config.dependencies;
     let setup = &experiment_config.setup;
     let teardown = &experiment_config.teardown;
     let variations = &experiment_config.variations;
@@ -978,20 +965,17 @@ pub fn generate_experiments(
             name: name.clone(),
             description: description.clone(),
             kind: kind.clone(),
-            setup: map_remote_executions(
-                config,
-                setup,
-                RemoteExecutionType::Setup,
-            )?,
+            setup: map_remote_executions(config, setup, FileType::Setup)?,
             teardown: map_remote_executions(
                 config,
                 teardown,
-                RemoteExecutionType::Teardown,
+                FileType::Teardown,
             )?,
             // TODO(joren): These hosts may no longer be needed,
             // they are included in the struct where needed
             hosts: map_hosts(config, hosts),
             execute: remap_execute(config, execute, hosts)?,
+            dependencies: remap_dependencies(dependencies)?,
             expected_arguments,
             arguments: arguments.clone(),
             exporters: map_exporters(config, exporters),
@@ -1000,19 +984,19 @@ pub fn generate_experiments(
     Ok((experiment_config.runs, experiments))
 }
 
-fn check_file_exists(file: &Path) -> io::Result<()> {
-    let exists = file.try_exists()?;
+fn check_file_exists<P: AsRef<Path>>(file: P) -> io::Result<()> {
+    let exists = file.as_ref().try_exists()?;
 
     match exists {
         true => Ok(()),
         false => Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
-            format!("File '{}' does not exist", file.to_string_lossy()),
+            format!("File '{}' does not exist", file.as_ref().display()),
         )),
     }
 }
 
-fn check_files_exist(files: &[PathBuf]) -> io::Result<()> {
+fn check_files_exist<P: AsRef<Path>>(files: &[P]) -> io::Result<()> {
     for file in files.iter() {
         check_file_exists(file)?;
     }
@@ -1106,6 +1090,7 @@ mod tests {
                 description: "Testing the functionality of the software completely using localhost".into(),
                 kind: "localhost-result".into(),
                 execute: "./scripts/actual-work.sh".into(),
+                dependencies: vec![],
                 expected_arguments: Some(2),
                 arguments: vec!["Argument 1".into(), "Argument 2".into()],
                 exporters: vec![],
@@ -1206,7 +1191,7 @@ mod tests {
                 vec![RemoteExecution {
                     hosts: vec![re_host.clone()],
                     scripts: vec![script.clone()],
-                    re_type: RemoteExecutionType::from_str(stage).unwrap(),
+                    re_type: FileType::from_str(stage).unwrap(),
                 }],
             );
         }
@@ -1248,6 +1233,7 @@ mod tests {
                 teardown: remote_executions["teardown"].clone(),
                 hosts: vec![re_host.clone()],
                 execute: remote_executions["execute"].first().unwrap().clone(),
+                dependencies: vec![],
                 expected_arguments: Some(2),
                 arguments: vec!["Argument 1".into(), "Argument 2".into()],
                 exporters: vec![]
@@ -1261,6 +1247,7 @@ mod tests {
                 teardown: remote_executions["teardown"].clone(),
                 hosts: vec![re_host.clone()],
                 execute: remote_executions["execute"].first().unwrap().clone(),
+                dependencies: vec![],
                 arguments: vec!["Argument 1".into()],
                 expected_arguments: Some(1),
                 exporters: vec![]
@@ -1274,6 +1261,7 @@ mod tests {
                 teardown: remote_executions["teardown"].clone(),
                 hosts: vec![re_host.clone()],
                 execute: remote_executions["execute"].first().unwrap().clone(),
+                dependencies: vec![],
                 expected_arguments: Some(2),
                 arguments: vec!["Argument 1".into(), "Argument 2".into()],
                 exporters: vec![exporters["test-exporter"].clone()]
@@ -1287,6 +1275,7 @@ mod tests {
                 teardown: remote_executions["teardown"].clone(),
                 hosts: vec![re_host.clone()],
                 execute:  remote_executions["execute"].first().unwrap().clone(),
+                dependencies: vec![],
                 expected_arguments: Some(2),
                 arguments: vec!["Argument 1".into(), "Argument 2".into()],
                 exporters: vec![exporters["test-exporter"].clone(), exporters["another-test-exporter"].clone()]
