@@ -1,5 +1,5 @@
 use std::{
-    path::Path,
+    path::{Path, PathBuf},
     time::{Duration, SystemTime, SystemTimeError, UNIX_EPOCH},
 };
 
@@ -94,4 +94,9 @@ fn variation_dir_parts(variation_directory: &Path) -> (String, u16, u128) {
         .expect("Timestamp was not a valid u128 (milliseconds)");
 
     (experiment_name, run, ts)
+}
+
+fn file_to_deps_path(experiment_directory: &Path, file: &Path) -> PathBuf {
+    let filename = file.file_name().unwrap();
+    experiment_directory.join(format!("{}-deps", filename.to_string_lossy()))
 }

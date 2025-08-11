@@ -1,7 +1,10 @@
 use crate::parse::{
     Experiment, ExperimentRuns, Exporter, Host, RemoteExecution,
 };
-use crate::{time_since_epoch, variation_dir_parts, EXPORTER_DIR, REMOTE_DIR};
+use crate::{
+    file_to_deps_path, time_since_epoch, variation_dir_parts, EXPORTER_DIR,
+    REMOTE_DIR,
+};
 
 const MAX_EXPERIMENTS: usize = 32;
 const RUN_POLL_SLEEP: Duration = Duration::from_millis(250);
@@ -229,7 +232,12 @@ impl ExperimentRunner {
             // TODO(joren): For dependencies, the current solution is to upload them normally, and
             // then adjust them afterwards to be in the correct subdirectory. It's definitely dumb
             // to do it this way but it's the path of least resistance at the moment.
-            // Self::correct_dependencies(&sessions, &experiment)
+            Self::correct_dependencies(
+                &sessions,
+                &experiments,
+                &experiment_directory,
+            )
+            .await?;
 
             for run in 1..=runs {
                 self.current_run.store(run, Ordering::Relaxed);
@@ -243,6 +251,16 @@ impl ExperimentRunner {
 
                     self.update_current_experiment(experiment, run).await;
                     ssh::make_directory(&sessions, variation_directory).await?;
+
+                    // Here we symlink our script dependencies within the current repeat directory
+                    Self::symlink_dependencies(
+                        &sessions,
+                        &experiment.execute,
+                        &experiment.dependencies,
+                        &experiment_directory,
+                        variation_directory,
+                    )
+                    .await?;
 
                     let _exporters = Self::start_exporters(
                         &sessions,
@@ -334,17 +352,57 @@ impl ExperimentRunner {
         hosts
     }
 
-    // fn dependencies(sessions: &Sessions, experiment: Experiment, experiment_directory: &Path) {
-    //     let execute = &experiment.execute;
-    //     let fname = execute.scripts.first().unwrap().file_name().unwrap().to_string_lossy();
-    //     let execute_dir = execute.scripts.first().unwrap().set_file_name(format!("{fname}-deps"));
-    //
-    //     let command_args = vec![];
-    //     ssh::run_command_at(sessions, command_args, experiment_directory)
-    //     let deps = &experiment.dependencies;
-    //
-    //     deps.iter().
-    // }
+    // TODO(joren): This function shouldn't even exist.
+    // We should make sure that we upload our dependencies into the correct directories from the
+    // beginning of each experiment. This workaround doesn't make much sense.
+    async fn correct_dependencies(
+        sessions: &Sessions,
+        experiments: &[Experiment],
+        experiment_directory: &Path,
+    ) -> Result<()> {
+        for experiment in experiments.iter() {
+            let execute = &experiment.execute;
+            // let fname = execute
+            //     .scripts
+            //     .first()
+            //     .unwrap()
+            //     .file_name()
+            //     .unwrap()
+            //     .to_string_lossy();
+            let execute_directory = experiment_directory.join(format!(
+                "{}-deps",
+                execute
+                    .scripts
+                    .first()
+                    .unwrap()
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+            ));
+
+            ssh::make_directory(sessions, &execute_directory).await?;
+            // ssh::run_command_at(sessions, &command_args, experiment_directory)
+            //     .await?;
+
+            let mut command_args = vec!["mv".to_string()];
+            for script in experiment.dependencies.iter() {
+                command_args.push(
+                    script.file_name().unwrap().to_string_lossy().to_string(),
+                );
+            }
+            command_args.push(
+                execute_directory
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string(),
+            );
+            dbg!(&command_args);
+            ssh::run_command_at(sessions, &command_args, experiment_directory)
+                .await?;
+        }
+        Ok(())
+    }
 
     /// Loops through a slice of experiments and returns
     /// unique filepaths for that slice.
@@ -360,6 +418,13 @@ impl ExperimentRunner {
         files.dedup();
         files
     }
+
+    //     fn unique_dependencies_for_all_experiments(
+    //         experiments: &[Experiment],
+    //     ) -> Vec<&Path> {
+    //         let mut files: Vec<&Path> = experiments.
+    // iter().flat_map(|experiment| experiment.dependencies()).collect();
+    //     }
 
     /// Starts long-running exporters, which are expected to collect
     /// system-level metrics whilst an experiment is running.
@@ -490,6 +555,37 @@ impl ExperimentRunner {
         }
 
         Ok(())
+    }
+
+    async fn symlink_dependencies(
+        sessions: &Sessions,
+        remote_execution: &RemoteExecution,
+        dependencies: &[PathBuf],
+        experiment_directory: &Path,
+        variation_directory: &Path,
+    ) -> Result<()> {
+        let filter_sessions =
+            Self::filter_host_sessions(sessions, &remote_execution.hosts);
+
+        let deps_path = file_to_deps_path(
+            experiment_directory,
+            remote_execution.scripts.first().unwrap(),
+        );
+
+        let mut command = vec![
+            "ln".to_string(),
+            "-s".into(),
+            "-t".into(),
+            variation_directory.to_string_lossy().into(),
+        ];
+        for dependency in dependencies.iter() {
+            let dep = deps_path.join(dependency.file_name().unwrap());
+            command.push(dep.to_string_lossy().to_string());
+        }
+
+        ssh::run_command(&filter_sessions, &command)
+            .await
+            .map_err(RuntimeError::from)
     }
 
     async fn collect_results(
