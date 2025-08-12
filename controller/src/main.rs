@@ -70,8 +70,8 @@ async fn index() -> &'static str {
 }
 
 //
-/// Adds a new experiment to the runner queue.
-/// Experiments are started at the runner's discretion.
+// Adds a new experiment to the runner queue.
+// Experiments are started at the runner's discretion.
 // async fn add_experiment(
 //     State(state): State<Arc<AppState>>,
 //     experiment: Json<Experiment>,
@@ -96,7 +96,7 @@ async fn index() -> &'static str {
 //     })
 // }
 
-/// Used to run discrete, one-off bash commands.
+// Used to run discrete, one-off bash commands.
 // async fn execute(
 //     State(state): State<Arc<AppState>>,
 //     execute_request: Json<ExecuteRequest>,

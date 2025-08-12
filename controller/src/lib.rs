@@ -15,6 +15,7 @@ use std::{
     time::{Duration, SystemTime, SystemTimeError, UNIX_EPOCH},
 };
 
+#[allow(dead_code)]
 pub mod db;
 pub mod parse;
 pub mod run;

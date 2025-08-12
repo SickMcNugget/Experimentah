@@ -1,3 +1,5 @@
+//! Functionality for queueing and running experiments.
+
 use crate::parse::{
     Experiment, ExperimentRuns, Exporter, Host, RemoteExecution,
 };
@@ -6,14 +8,20 @@ use crate::{
     REMOTE_DIR,
 };
 
+/// Internally I've just set the queue to begin with a capacity of 32 potential [`ExperimentRuns`].
+/// This isn't actually a cap on the number of experiments that can be run, but potentially in the
+/// future we may have some guidance as to what a reasonable limit should be.
 const MAX_EXPERIMENTS: usize = 32;
+
+/// When there are no experiments inside of the experiment queue, we poll the queue periodically to
+/// determine whether there are any experiments available. This is the delay between successive
+/// checks on the queue.
 const RUN_POLL_SLEEP: Duration = Duration::from_millis(250);
 
-use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
-// use reqwest::Client;
 use log::{error, info};
+use std::collections::{HashMap, VecDeque};
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -21,103 +29,133 @@ use tokio::sync::Mutex;
 use crate::ssh::{self, BackgroundProcesses, Sessions};
 use crate::{RESULTS_DIR, STORAGE_DIR};
 
-type Result<T> = std::result::Result<T, RuntimeError>;
-type Exporters = HashMap<String, BackgroundProcesses>;
+/// A specialised [`Result`] type for runtime problems with experiments
+///
+/// This type is broadly used across [`crate::run`] for any operation which may produce an
+/// error.
+///
+/// This typedef is generally used to avoid writing out [`crate::run::Error`] directly and is
+/// otherwise a direct mapping to [`Result`].
+pub type Result<T> = std::result::Result<T, Error>;
 
+/// To create long-running exporters, we spawn them in the background and
+/// retain a handle to them for the rest of the experiment.
+/// The [`Exporters`] type represents this mapping.
+///
+/// In the future, this type may also take into account exporters run on the local system, too.
+pub type Exporters = HashMap<String, BackgroundProcesses>;
+
+/// The error type for runtime errors.
+///
+/// Errors are generally handled internally by a main-loop function, which
+/// is executed via the [`ExperimentRunner::start`] function which is public to the user. These
+/// errors usally wrap an SSH error, since they are the most frequent source of runtime problems.
+///
+/// All errors include additional context that explains *when* the error occurred during experiment
+/// runtime.
 #[derive(Debug)]
-pub enum RuntimeError {
-    // ReqwestError(String, reqwest::Error),
-    // I know, it's hilarious
-    // BadStatusCode(String, reqwest::StatusCode),
+pub enum Error {
     IOError(String, std::io::Error),
     TimeError(String, std::time::SystemTimeError),
     Generic(String),
 }
 
-impl std::fmt::Display for RuntimeError {
+impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match *self {
-            // RuntimeError::ReqwestError(ref message, ref source) => {
-            //     write!(f, "{message}: {source}")
-            // }
-            // RuntimeError::BadStatusCode(ref message, ref code) => {
-            //     write!(f, "{message}: Failed with status code: {code}")
-            // }
-            RuntimeError::IOError(ref message, ref source) => {
+            Error::IOError(ref message, ref source) => {
                 write!(f, "{message}: {source}")
             }
-            RuntimeError::TimeError(ref message, ref source) => {
+            Error::TimeError(ref message, ref source) => {
                 write!(f, "{message}: {source}")
             }
-            RuntimeError::Generic(ref message) => {
+            Error::Generic(ref message) => {
                 write!(f, "{message}")
             }
         }
     }
 }
 
-impl std::error::Error for RuntimeError {
+impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match *self {
-            // RuntimeError::ReqwestError(.., ref source) => Some(source),
-            RuntimeError::IOError(.., ref source) => Some(source),
-            RuntimeError::TimeError(.., ref source) => Some(source),
-            // RuntimeError::BadStatusCode(..) => None,
-            RuntimeError::Generic(..) => None,
+            Error::IOError(.., ref source) => Some(source),
+            Error::TimeError(.., ref source) => Some(source),
+            Error::Generic(..) => None,
         }
     }
 }
 
-impl From<std::io::Error> for RuntimeError {
+impl From<std::io::Error> for Error {
+    /// Converts from an [`std::io::Error`] into an [`Error::IOError`] with a predefined "I/O error"
+    /// context message.
     fn from(value: std::io::Error) -> Self {
-        RuntimeError::IOError("I/O error".to_string(), value)
+        Error::IOError("I/O error".to_string(), value)
     }
 }
 
-impl From<(&str, std::io::Error)> for RuntimeError {
+impl From<(&str, std::io::Error)> for Error {
+    /// Converts from an [`std::io::Error`] into an [`Error::IOError`] with a custom context
+    /// message. This is an ergonomic inclusion, and converts the &str into a String.
     fn from(value: (&str, std::io::Error)) -> Self {
-        RuntimeError::IOError(value.0.to_string(), value.1)
+        Error::IOError(value.0.to_string(), value.1)
     }
 }
 
-impl From<(String, std::io::Error)> for RuntimeError {
+impl From<(String, std::io::Error)> for Error {
+    /// Converts from an [`std::io::Error`] into an [`Error::IOError`] with a custom context
+    /// message.
     fn from(value: (String, std::io::Error)) -> Self {
-        RuntimeError::IOError(value.0, value.1)
+        Error::IOError(value.0, value.1)
     }
 }
 
-impl From<std::time::SystemTimeError> for RuntimeError {
+impl From<std::time::SystemTimeError> for Error {
+    /// Converts from an [`std::time::SystemTimeError`] into an [`Error::TimeError`] with a
+    /// predefined "System Time error" context message.
     fn from(value: std::time::SystemTimeError) -> Self {
-        RuntimeError::TimeError("System Time error".to_string(), value)
+        Error::TimeError("System Time error".to_string(), value)
     }
 }
 
-impl From<ssh::SSHError> for RuntimeError {
-    fn from(value: ssh::SSHError) -> Self {
-        RuntimeError::Generic(value.to_string())
+impl From<ssh::Error> for Error {
+    /// Converts from a [`crate::ssh::Error`] into an [`Error::Generic`] with the message
+    /// directly taken from [`crate::ssh::Error`] (without context)
+    fn from(value: ssh::Error) -> Self {
+        Error::Generic(value.to_string())
     }
 }
 
-impl From<String> for RuntimeError {
+impl From<String> for Error {
+    /// Converts from a String message to an [`Error::Generic`].
     fn from(value: String) -> Self {
-        RuntimeError::Generic(value)
+        Error::Generic(value)
     }
 }
 
-impl From<&str> for RuntimeError {
+impl From<&str> for Error {
+    /// Converts from a &str message to an [`Error::Generic`].
     fn from(value: &str) -> Self {
-        RuntimeError::Generic(value.to_string())
+        Error::Generic(value.to_string())
     }
 }
 
-type ExperimentQueue = Mutex<VecDeque<ExperimentRuns>>;
+/// The [`ExperimentRunner`] needs a queue for receiving and running experiments.
+/// This type contains that queue, which is within a mutex for internal mutability.
+pub type ExperimentQueue = Mutex<VecDeque<ExperimentRuns>>;
 
-// The ExperimentRunner should only be used AFTER parsing has been completed!
+/// An [`ExperimentRunner`] provides the main functionality of Experimentah. It has a queue along
+/// with multiple metrics for inspecting the current state of the controller.
 pub struct ExperimentRunner {
+    /// When an experiment is running, this contains the name of the experiment
     pub current_experiment: Mutex<Option<String>>,
-    /// Runs start from 1. 0 Means that nothing is being worked on.
+    /// When an experiment is running, this contains the total number of runs that the experiment
+    /// will be repeated for.
     pub current_runs: AtomicU16,
+    /// When an experiment is running, this contains the current run number that the experiment is
+    /// up to.
     pub current_run: AtomicU16,
+    /// The queue containing experiments sent in from clients.
     pub experiment_queue: ExperimentQueue,
 }
 
@@ -179,12 +217,17 @@ impl ExperimentRunner {
         *current_experiment = Some(experiment.name.clone());
     }
 
-    /// I really have no idea what I want to do for the ExperimentRunner main loop.
-    /// Up until this point, start has been both the entry point and the houses the entire loop
-    /// for ExperimentRunner. I have a feeling that separating the main loop from a user trying
-    /// to start the main loop will make error handling easier, but I'm just unsure overall as
-    /// to what the state of this struct needs to be for 1.0.
-    /// - Joren
+    // I really have no idea what I want to do for the ExperimentRunner main loop.
+    // Up until this point, start has been both the entry point and the houses the entire loop
+    // for ExperimentRunner. I have a feeling that separating the main loop from a user trying
+    // to start the main loop will make error handling easier, but I'm just unsure overall as
+    // to what the state of this struct needs to be for 1.0.
+    // - Joren
+    //
+    /// Initialise the experiment runner. After this function has been run, the  ExperimentRunner
+    /// will begin to consume from it's internal queue until there is nothing left to consume.
+    /// Experiments can always be added to an experiment runner before it has been started, so
+    /// there may be functionality in the future to pause the runner.
     pub async fn start(&self) {
         info!("Experiment runner now running..");
         loop {
@@ -194,6 +237,11 @@ impl ExperimentRunner {
         }
     }
 
+    /// Internally, this is the bread and butter of Experimentah. Everything happens inside of this
+    /// function, and it makes it pretty obvious (in my opinion) as to what the pipeline for
+    /// running experiments looks like. This loop tries to retrieve experiments from the queue, and
+    /// once it succeeds, it runs those experiments until completion for the number of repeats
+    /// specified.
     async fn main_loop(&self) -> Result<()> {
         loop {
             let (runs, experiments) = self.wait_for_experiments().await;
@@ -318,6 +366,9 @@ impl ExperimentRunner {
         }
     }
 
+    /// Since [`Sessions`] are just a mapping of host addresses to SSH sessions, this functions
+    /// allows us to filter down a large mapping of [`Sessions`] to those that are important to our
+    /// current scope.
     fn filter_sessions(sessions: &Sessions, addresses: &[String]) -> Sessions {
         sessions
             .iter()
@@ -326,8 +377,9 @@ impl ExperimentRunner {
             .collect()
     }
 
-    /// This function should only be called once we know that 'hosts' contains
-    /// no duplicate values.
+    /// This is the same as the [`filter_sessions`] function, except it takes advantage of the fact
+    /// that many structs in Experimentah contain a list of [`Host`]s that we can filter on. Just a
+    /// bit of syntactic sugar.
     fn filter_host_sessions(sessions: &Sessions, hosts: &[Host]) -> Sessions {
         let addresses: Vec<String> =
             hosts.iter().map(|host| &host.address).cloned().collect();
@@ -428,7 +480,7 @@ impl ExperimentRunner {
 
     /// Starts long-running exporters, which are expected to collect
     /// system-level metrics whilst an experiment is running.
-    /// Think tools 'sar' or 'ipmitool'
+    /// Think tools like 'sar' or 'ipmitool'
     async fn start_exporters(
         sessions: &Sessions,
         exporters: &[Exporter],
@@ -544,7 +596,7 @@ impl ExperimentRunner {
             let remote_script = experiment_directory.join(remote_script);
             ssh::run_script_at(
                 &setup_sessions,
-                &remote_script,
+                remote_script,
                 variation_directory,
             )
             .await?;
@@ -585,7 +637,7 @@ impl ExperimentRunner {
 
         ssh::run_command(&filter_sessions, &command)
             .await
-            .map_err(RuntimeError::from)
+            .map_err(Error::from)
     }
 
     async fn collect_results(
@@ -605,7 +657,7 @@ impl ExperimentRunner {
             STORAGE_DIR, RESULTS_DIR, ts, run, experiment_name
         )))
         .map_err(|e| {
-            RuntimeError::from((
+            Error::from((
                 "Failed to canonicalize local results dir".to_string(),
                 e,
             ))
@@ -618,393 +670,8 @@ impl ExperimentRunner {
     }
 }
 
-// Checks if runners are reachable
-// If any runners fail, they are returned in a vector to be activated
-// later.
-// pub async fn check_runners(&mut self) -> Result<()> {
-//     let unique_runners =
-//         ExperimentRunner::unique_runners(&self.experiments);
-//
-//     for runner in unique_runners.into_iter() {
-//         let url = runner.url() + "/status";
-//         match self.client.get(&url).send().await {
-//             Ok(response) => {
-//                 let status = response.status();
-//                 match status {
-//                     // reqwest::StatusCode::OK => {
-//                         println!("Runner {} is available", runner.name)
-//                     }
-//                     // _ => Err(RuntimeError::BadStatusCode(
-//                         format!("Error reaching runner at {}", url),
-//                         status,
-//                     // ))?,
-//                 };
-//             }
-//             Err(e) => {
-//                 // If we were unable to connect to the runner,
-//                 // then we can try and make sure that there is a
-//                 // runner running
-//                 if e.is_connect() {
-//                     self.subprocesses.push(ChildProcess::new(
-//                         runner.address.to_string(),
-//                         ExperimentRunner::distribute_runner(
-//                             runner.address,
-//                             runner.port,
-//                         )?,
-//                     ));
-//                 } else {
-//                     Err(RuntimeError::from((
-//                         format!(
-//                             "Error making request to runner {}",
-//                             runner.name
-//                         ),
-//                         e,
-//                     )))?
-//                 }
-//             }
-//         }
-//     }
-//     Ok(())
+// #[cfg(test)]
+// mod tests {
+//     #[test]
+//     fn enqueue_experiment() {}
 // }
-
-// We assume the runner is in the current directory and simply called 'runner'
-// A key aspect of experimentah is the use of advisory locks. These
-// fn distribute_runner(address: &str, _port: &u16) -> Result<Child> {
-//     let runner_binary = Path::new("./runner");
-//
-//     dbg!(runner_binary);
-//     assert!(
-//         runner_binary.exists(),
-//         "Runner binary does not exist in current directory!"
-//     );
-//
-//     if address == "localhost" {
-//         match Command::new(runner_binary).spawn() {
-//             Ok(child) => Ok(child),
-//             Err(e) => {
-//                 Err(RuntimeError::from(("Unable to execute runner", e)))?
-//             }
-//         }
-//     } else {
-//         match Command::new("ssh").arg(address).spawn() {
-//             Ok(child) => {
-//                 Ok(child)
-//                 // println!("{}", result.status)
-//             }
-//             Err(e) => Err(RuntimeError::from(("Error executing SSH", e)))?,
-//         }
-//     }
-// }
-
-/// An 'experiment' can consist of multiple 'variations'.
-/// If the top level of an experiment config contains all the variables required
-/// to run an experiment, then an experiment is run with these variables in addition
-/// to any variations that may also be present inside the same config.
-///
-/// This means you can have a default script that is run with default arguments on
-/// a default set of runners with default exporters, which can be overwritten in
-/// each and every variation.
-/// Setup and teardown cannot be varied, and the current recommendation is that
-/// another experiment configuration be made if these need to be changed.
-// pub async fn run_experiments() {}
-// pub async fn run_experiments(&self) -> Result<Vec<String>, Box<dyn Error>> {
-//     let mut successful_experiments = Vec::new();
-//
-//     for variation in self.experiment_config.experiments().iter() {
-//         self.run_experiment(experiment).await?;
-//         successful_experiments.push(experiment.id().clone());
-//     }
-//
-//     Ok(successful_experiments)
-// }
-//
-// async fn run_experiment(
-//     &self,
-//     experiment: &Experiment,
-// ) -> Result<(), Box<dyn Error>> {
-//     let experiment_id = self.create_experiment(experiment).await?;
-//     experiment.allocate_id(experiment_id)?;
-//
-//     let exporters_mapping = self.configure_prometheus(experiment).await?;
-//     // TODO(joren): add wait for prometheus ready
-//
-//     self.experiment_setup(experiment).await?;
-//
-//     let mut job_ids = Vec::new();
-//     for job in experiment.jobs().iter() {
-//         let job_id = self.run_job(job, experiment).await;
-//         job_ids.push(job_id);
-//     }
-//
-//     // exporters_mapping = self.configure_prometheus(experiment_id);
-//     Ok(())
-// }
-//
-// pub async fn check_metrics_api(&self) -> reqwest::Result<()> {
-//     let endpoint = format!("http://{}/status", self.config.metric_server());
-//     let response = self.client.get(endpoint).send().await?; // .await?;
-//     response.error_for_status()?;
-//     Ok(())
-// }
-//
-// pub async fn check_runners(&self) -> reqwest::Result<()> {
-//     for url in self.config.runners().iter() {
-//         let endpoint = format!("http://{}/job", url);
-//         let response = self.client.get(endpoint).send().await?;
-//         response.error_for_status()?;
-//     }
-//     Ok(())
-// }
-//
-// async fn wait_for_jobs() {}
-//
-// async fn create_job(
-//     &self,
-//     job: &Job,
-//     experiment: &Experiment,
-// ) -> reqwest::Result<String> {
-//     let response = {
-//         let endpoint = format!(
-//             "http://{}/experiment/{}/job",
-//             self.config.metric_server(),
-//             experiment.id()
-//         );
-//         let body = json!({
-//             "experimentId": *experiment.id(),
-//             "runnerName": job.runner(),
-//             "exporters": "yummers",
-//             "workload": job.name(),
-//             "supplementary": "false",
-//             "resultsType": experiment.kind(),
-//             "arguments": job.arguments(),
-//             "timestampMs": get_time(),
-//         });
-//         // let body = HashMap::from([
-//         //     ("experimentId", experiment.id().clone()),
-//         //     ("runnerName", job.runner().clone()),
-//         //     ("exporters", "yummers".into()),
-//         //     ("workload", job.name().clone()),
-//         //     ("supplementary", "false".into()),
-//         //     ("resultsType", experiment.kind().clone()),
-//         //     ("arguments", job.arguments().to_string()),
-//         //     ("timestampMs", get_time()),
-//         // ]);
-//         self.client.post(endpoint).json(&body).send().await?
-//     };
-//
-//     response.error_for_status_ref()?;
-//     let ret = response.json().await?;
-//     Ok(ret)
-// }
-//
-// async fn start_job(
-//     &self,
-//     job_id: &str,
-//     job: &Job,
-//     experiment: &Experiment,
-// ) -> reqwest::Result<()> {
-//     let response = {
-//         let endpoint = format!("http://{}/job", job.runner());
-//         // let args_str = job.arguments().to_string();
-//         let body = json!({
-//             "jobId": job_id,
-//             "experimentId": *experiment.id(),
-//             "workload": job.name(),
-//             "workloadType": experiment.kind(),
-//             "arguments": job.arguments()
-//         });
-//         // let body: HashMap<&str, &str> = HashMap::from([
-//         //     ("jobId", job_id),
-//         //     ("experimentId", &experiment.id()()),
-//         //     ("workload", job.name()),
-//         //     ("workloadType", experiment.kind()),
-//         //     ("arguments", &args_str),
-//         // ]);
-//         self.client.post(endpoint).json(&body).send().await?
-//     };
-//
-//     response.error_for_status_ref()?;
-//     // let ret = response.json().await?;
-//     Ok(())
-// }
-//
-// async fn run_job(
-//     &self,
-//     job: &Job,
-//     experiment: &Experiment,
-// ) -> reqwest::Result<()> {
-//     let job_id = self.create_job(job, experiment).await?;
-//     self.start_job(&job_id, job, experiment).await
-// }
-// // fn update_experiment(&self, experiment: &mut Experiment) {}
-//
-// async fn create_experiment(
-//     &self,
-//     experiment: &Experiment,
-// ) -> reqwest::Result<String> {
-//     let response = {
-//         let endpoint =
-//             format!("http://{}/experiment", self.config.metric_server());
-//         let body = json!({
-//             "name": experiment.name(),
-//             "timestampMs": get_time()
-//         });
-//         // let body = HashMap::from([("name", experiment.name()), ("timestamp_ms", &now)]);
-//         self.client.post(endpoint).json(&body).send().await?
-//     };
-//
-//     response.error_for_status_ref()?;
-//     let experiment_id = response.json().await?;
-//     // experiment
-//     //     .allocate_id(experiment_id)
-//     //     .expect("Somehow the experiment id was already allocated");
-//
-//     Ok(experiment_id)
-// }
-//
-// async fn configure_prometheus(
-//     &self,
-//     experiment: &Experiment,
-// ) -> reqwest::Result<HashMap<String, String>> {
-//     let response = {
-//         let endpoint =
-//             format!("http://{}/prometheus", self.config.metric_server());
-//         let body = json!({
-//             "experimentId": *experiment.id(),
-//             "exporters": self.config.exporters_map()
-//         });
-//         // let body = HashMap::from([
-//         //     (
-//         //         "experiment_id",
-//         //         PrometheusRequestBody::String(experiment.id().clone()),
-//         //     ),
-//         //     (
-//         //         "exporters",
-//         //         PrometheusRequestBody::HashMap(self.config.exporters_map()),
-//         //     ),
-//         // ]);
-//         self.client.post(endpoint).json(&body).send().await?
-//     };
-//
-//     response.error_for_status_ref()?;
-//     let ret = response.json().await?;
-//     Ok(ret)
-// }
-//
-// async fn experiment_setup(
-//     &self,
-//     experiment: &Experiment,
-// ) -> Result<(), Box<dyn Error>> {
-//     for setup in experiment.setup().iter() {
-//         for runner in self.config.runners().iter() {
-//             self.default_setup_tasks(runner).await?;
-//
-//             let commands = setup.commands()?;
-//             self.custom_setup_tasks(runner, &commands).await?;
-//
-//             let response = {
-//                 let endpoint = format!(
-//                     "http://{}/experiment/{}/setup",
-//                     self.config.metric_server(),
-//                     experiment.id()
-//                 );
-//                 let body = json!({
-//                     "experimentId": *experiment.id(),
-//                     "runner": runner,
-//                     "commands": commands
-//                 });
-//                 self.client.post(endpoint).json(&body).send().await?
-//             };
-//             response.error_for_status_ref()?;
-//             response.json().await?;
-//         }
-//     }
-//     Ok(())
-// }
-//
-// // async fn
-// async fn custom_setup_tasks(
-//     &self,
-//     runner: &String,
-//     commands: &Vec<String>,
-// ) -> reqwest::Result<()> {
-//     let response = {
-//         let endpoint = format!("http://{}/exec", runner);
-//         let body = json!({
-//             "commands": commands
-//         });
-//         self.client.post(endpoint).json(&body).send().await?
-//     };
-//
-//     response.error_for_status_ref()?;
-//     let ret = response.json().await?;
-//     Ok(ret)
-// }
-//
-// async fn default_setup_tasks(
-//     &self,
-//     runner: &String,
-// ) -> reqwest::Result<()> {
-//     let response = {
-//         let endpoint = format!("http://{}/default_setup", runner);
-//         self.client.post(endpoint).send().await?
-//     };
-//
-//     response.error_for_status_ref();
-//     // let _ = response.json().await?;
-//     Ok(())
-// }
-// // pub fn run_experiment() -> Result<String, String> {}
-// }
-
-#[allow(dead_code)]
-fn get_time() -> String {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("Time went backwards")
-        .as_millis()
-        .to_string()
-}
-
-#[cfg(test)]
-mod tests {
-    // use std::{path::PathBuf, str::FromStr, time::Duration};
-    //
-    // use super::*;
-
-    // fn
-
-    #[test]
-    fn enqueue_experiment() {}
-    // use crate::parse::{Config, ExperimentConfig};
-    //
-    // fn test_path() -> PathBuf {
-    //     PathBuf::from_str("test").expect("Failed to parse test_path")
-    // }
-    //
-    // fn generate_configs() -> (Config, ExperimentConfig) {
-    //     let test_path = test_path();
-    //     let config = Config::from_file(&test_path.join("test_config.toml"))
-    //     .expect("Config failed to parse. Refer to parse::parse_config test for what went wrong");
-    //     let experiment_config = ExperimentConfig::from_file(&test_path.join("test_experiment_config.toml"))
-    //     .expect("ExperimentConfig failed to parse. Refer to parse::parse_experiment_config test for what went wrong");
-    //
-    //     (config, experiment_config)
-    // }
-
-    // fn generate_client() -> Client {
-    //     Client::builder()
-    //         .timeout(Duration::from_secs(1))
-    //         .build()
-    //         .expect("Somehow an invalid client was built")
-    // }
-
-    // #[tokio::test]
-    // async fn runner_availability() {
-    //     let (config, experiment_config) = generate_configs();
-    //     let client = generate_client();
-    //     let mut er = ExperimentRunner::new(&config, &experiment_config, client);
-    //
-    //     er.check_runners().await.unwrap();
-    // }
-}

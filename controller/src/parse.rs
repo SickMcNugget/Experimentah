@@ -1,5 +1,5 @@
 //! Functionality for parsing experiment configuration files and converting them into an internal
-//! representation is provided within this crate.
+//! representation is provided in this module.
 
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -103,7 +103,7 @@ impl std::error::Error for Error {
 
 impl From<(String, std::io::Error)> for Error {
     /// Converts from an [`io::Error`] into a [`Error::IOError`] with a custom context
-    /// messsage
+    /// message
     fn from(value: (String, std::io::Error)) -> Self {
         Error::IOError(value.0, value.1)
     }
@@ -1040,7 +1040,7 @@ pub fn generate_experiments(
 
         experiments.push(Experiment {
             id: None,
-            name: name,
+            name,
             description: description.clone(),
             kind: kind.clone(),
             setup: map_remote_executions(config, setup, FileType::Setup)?,
