@@ -14,7 +14,7 @@ use axum::{
 };
 
 use controller::{
-    parse::{self, Config, ExperimentConfig, FileType, ParseError},
+    parse::{self, Config, ExperimentConfig, FileType},
     run::ExperimentRunner,
 };
 
@@ -128,7 +128,7 @@ fn router(run_state: SharedRunState) -> Router {
 async fn run(
     State(run_state): State<SharedRunState>,
     configs: Json<(Config, ExperimentConfig)>,
-) -> Result<(), ParseError> {
+) -> Result<(), parse::Error> {
     info!("Received configs over the wire");
     let (config, experiment_config) = configs.0;
 

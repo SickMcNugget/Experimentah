@@ -1,3 +1,6 @@
+//! Functionality for parsing experiment configuration files and converting them into an internal
+//! representation is provided within this crate.
+
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use log::error;
@@ -9,37 +12,55 @@ use std::{fs, io};
 
 use crate::STORAGE_DIR;
 
-type Result<T> = std::result::Result<T, ParseError>;
+/// A specialised [`Result`] type for Parsing operations.
+///
+/// This type is broadly used across [`crate::parse`] for any operation which may produce an
+/// error.
+///
+/// This typedef is generally used to avoid writing out [`crate::parse::Error`] directly and is
+/// otherwise a direct mapping to [`Result`].
+///
+/// # Examples
+///
+/// ```
+/// use controller::parse::{self, Config};
+///
+/// fn check_my_config(config: Config) -> parse::Result<()> {
+///     config.validate()
+/// }
+/// ```
+pub type Result<T> = std::result::Result<T, Error>;
 
+/// The error type for Parsing operations.
+///
+/// Errors are generally exposed by the [`Config::validate`], [`ExperimentConfig::validate`],
+/// [`ExperimentConfig::validate_files`] and [`generate_experiments`] functions. Errors generally
+/// result from an invalid configuration file, missing files on disk, or errors cross-referencing
+/// the information between an experiment config and it's corresponding config file.
+///
+/// All errors include additional context that explains *when* the error occurred during the
+/// parsing pipeline.
 #[derive(Debug)]
-pub enum ParseError {
-    ParseError {
-        message: String,
-        source: Box<ParseError>,
-    },
-    IOError {
-        message: String,
-        source: std::io::Error,
-    },
-    DeserializeError {
-        message: String,
-        source: toml::de::Error,
-    },
+pub enum Error {
+    Error(String, Box<Error>),
+    IOError(String, std::io::Error),
+    DeserializeError(String, toml::de::Error),
     ValidationError(String),
 }
 
-impl ParseError {
-    fn status_code(&self) -> StatusCode {
+impl Error {
+    /// Best-effort status codes for use with HTTP Servers.
+    pub fn status_code(&self) -> StatusCode {
         match *self {
-            ParseError::ParseError { ref source, .. } => source.status_code(),
-            ParseError::IOError { .. } => StatusCode::INTERNAL_SERVER_ERROR,
-            ParseError::DeserializeError { .. } => StatusCode::BAD_REQUEST,
-            ParseError::ValidationError(..) => StatusCode::BAD_REQUEST,
+            Error::Error(.., ref source) => source.status_code(),
+            Error::IOError(..) => StatusCode::INTERNAL_SERVER_ERROR,
+            Error::DeserializeError(..) => StatusCode::BAD_REQUEST,
+            Error::ValidationError(..) => StatusCode::BAD_REQUEST,
         }
     }
 }
 
-impl IntoResponse for ParseError {
+impl IntoResponse for Error {
     fn into_response(self) -> axum::response::Response {
         error!("{}", self);
         let body = self.to_string();
@@ -48,141 +69,111 @@ impl IntoResponse for ParseError {
     }
 }
 
-impl std::fmt::Display for ParseError {
+impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match *self {
-            ParseError::IOError {
-                ref message,
-                ref source,
-            } => write!(f, "{message}: {source}"),
+            Error::IOError(ref message, ref source) => {
+                write!(f, "{message}: {source}")
+            }
 
-            ParseError::DeserializeError {
-                ref message,
-                ref source,
-            } => write!(f, "{message}: {source}"),
+            Error::DeserializeError(ref message, ref source) => {
+                write!(f, "{message}: {source}")
+            }
 
-            ParseError::ParseError {
-                ref message,
-                ref source,
-            } => write!(f, "{message}: {source}"),
-            ParseError::ValidationError(ref message) => {
+            Error::Error(ref message, ref source) => {
+                write!(f, "{message}: {source}")
+            }
+            Error::ValidationError(ref message) => {
                 write!(f, "Validation error: {message}")
             }
         }
     }
 }
 
-impl std::error::Error for ParseError {
+impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match *self {
-            Self::ParseError { ref source, .. } => Some(source),
-            Self::IOError { ref source, .. } => Some(source),
-            Self::DeserializeError { ref source, .. } => Some(source),
+            Self::Error(.., ref source) => Some(source),
+            Self::IOError(.., ref source) => Some(source),
+            Self::DeserializeError(.., ref source) => Some(source),
             Self::ValidationError(_) => None,
         }
     }
 }
 
-impl From<(String, std::io::Error)> for ParseError {
+impl From<(String, std::io::Error)> for Error {
+    /// Converts from an [`io::Error`] into a [`Error::IOError`] with a custom context
+    /// messsage
     fn from(value: (String, std::io::Error)) -> Self {
-        ParseError::IOError {
-            message: value.0,
-            source: value.1,
-        }
+        Error::IOError(value.0, value.1)
     }
 }
 
-impl From<(&str, std::io::Error)> for ParseError {
+impl From<(&str, std::io::Error)> for Error {
+    /// Converts from an [`io::Error`] into a [`Error::IOError`] with a custom context
+    /// message. This is an ergonomic inclusion, and converts the &str into a String.
     fn from(value: (&str, std::io::Error)) -> Self {
-        ParseError::IOError {
-            message: value.0.to_owned(),
-            source: value.1,
-        }
+        Error::IOError(value.0.into(), value.1)
     }
 }
 
-impl From<std::io::Error> for ParseError {
+impl From<std::io::Error> for Error {
+    /// Converts from an [`io::Error`] into a [`Error::IOError`] with a predefined "IO Error"
+    /// context message.
     fn from(value: std::io::Error) -> Self {
-        ParseError::IOError {
-            message: "IO Error".to_string(),
-            source: value,
-        }
+        Error::IOError("IO Error".to_string(), value)
     }
 }
 
-impl From<(&str, toml::de::Error)> for ParseError {
+impl From<(&str, toml::de::Error)> for Error {
+    /// Converts from a [`toml::de::Error`] into a [`Error::DeserializeError`] with a custom
+    /// context message.
     fn from(value: (&str, toml::de::Error)) -> Self {
-        ParseError::DeserializeError {
-            message: value.0.to_owned(),
-            source: value.1,
-        }
+        Error::DeserializeError(value.0.to_owned(), value.1)
     }
 }
 
-impl From<(&str, ParseError)> for ParseError {
-    fn from(value: (&str, ParseError)) -> Self {
-        ParseError::ParseError {
-            message: value.0.to_string(),
-            source: Box::new(value.1),
-        }
+impl From<(&str, Error)> for Error {
+    /// Converts from a [`toml::de::Error`] into a [`Error::DeserializeError`] with a custom
+    /// context message. This is an ergonomic inclusion, and converts the &str into a String.
+    fn from(value: (&str, Error)) -> Self {
+        Error::Error(value.0.to_string(), Box::new(value.1))
     }
 }
 
-impl From<(String, ParseError)> for ParseError {
-    fn from(value: (String, ParseError)) -> Self {
-        ParseError::ParseError {
-            message: value.0,
-            source: Box::new(value.1),
-        }
+impl From<(String, Error)> for Error {
+    /// Converts from an [`Error`] into a [`Error::Error`] with a custom
+    /// context message. This allows for nesting errors with additional levels of context.
+    fn from(value: (String, Error)) -> Self {
+        Error::Error(value.0, Box::new(value.1))
     }
 }
 
+/// A configuration file containing reusable components which can be referenced from any number of
+/// [`ExperimentConfig`]s.
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct Config {
+    /// A Vector of [`HostConfig`]s which represents distinct hosts for use in experiments.
     pub hosts: Vec<HostConfig>,
+    /// A vector of [`ExporterConfig`]s which represent distinct exporters for use in experiments.
     pub exporters: Vec<ExporterConfig>,
 }
 
-// #[derive(Serialize)]
-// pub enum PrometheusRequestBody<'a> {
-//     String(String),
-//     HashMap(Vec<HashMap<&'a str, String>>),
-// }
-//
-// #[derive(Serialize)]
-// pub enum DbSaveRequestBody {
-//     String(String),
-//     Commands(Vec<String>),
-// }
-//
-// #[derive(Serialize)]
-// pub enum CreateJobRequest {
-//     String(String),
-//     Exporters(Vec<String>),
-//     Bool(bool),
-//     U8(u8),
-//     Timestamp(u128),
-// }
-//
-// #[derive(Serialize)]
-// pub enum CreateExperimentRequest {
-//     String(String),
-//     Time(u128),
-// }
-
 impl FromStr for Config {
-    type Err = ParseError;
+    type Err = Error;
+    /// Allows the generation of a [`Config`] from a TOML string
     fn from_str(s: &str) -> Result<Self> {
         Self::parse_toml(s)
     }
 }
 
 impl Config {
+    /// Generates a [`Config`] from a TOML file.
     pub fn from_file<P: AsRef<Path>>(file: P) -> Result<Self> {
         let config_str = std::fs::read_to_string(file.as_ref())
-            .map_err(|e| ParseError::from(("error reading config file", e)))?;
+            .map_err(|e| Error::from(("error reading config file", e)))?;
         Config::parse_toml(&config_str).map_err(|e| {
-            ParseError::from((
+            Error::from((
                 format!("Error in config file {}", file.as_ref().display()),
                 e,
             ))
@@ -191,14 +182,20 @@ impl Config {
 
     fn parse_toml(toml: &str) -> Result<Self> {
         let config = toml::from_str::<Self>(toml)
-            .map_err(|e| ParseError::from(("Error parsing config toml", e)))?;
+            .map_err(|e| Error::from(("Error parsing config toml", e)))?;
         Ok(config)
     }
 
+    /// From a slice of [`HostConfig`], generates a slice containing the remote address
+    /// corresponding to each host.
     pub fn host_endpoints(&self) -> Vec<String> {
         self.hosts.iter().map(|host| host.address.clone()).collect()
     }
 
+    /// Ensures that all fields of a [`Config`] are valid.
+    ///
+    /// Since a [`Config`] consists only of other structs, it delegates to their
+    /// *internal* validate functions.
     pub fn validate(&self) -> Result<()> {
         for host in self.hosts.iter() {
             host.validate()?;
@@ -211,15 +208,13 @@ impl Config {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
-pub struct BrainConfig {
-    pub host: String,
-    pub port: u16,
-}
-
+/// A [`HostConfig`] represents an SSH host which may be needed in an experiment.
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
 pub struct HostConfig {
+    /// An identifier to be used in place of the address in other config fields.
     pub name: String,
+    /// An SSH address. It should have the format: "user@remoteaddress" or "localhost", to specify
+    /// that actions should be performed locally instead of on a remote machine.
     pub address: String,
 }
 
@@ -234,11 +229,18 @@ impl HostConfig {
 //TODO(joren): Exporters should follow similar rules to normal execution.
 //Either a command or a file should be usable, it's the 21st century.
 //Don't waste time on that now, though
+
+/// An [`ExporterConfig`] stores information relating to metric collectors (which we call exporters
+/// in our framework).
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
 pub struct ExporterConfig {
+    /// An identifier for referring to this exporter within an [`ExperimentConfig`].
     pub name: String,
+    /// A list of host identifiers referencing [`HostConfig`]s found inside of a [`Config`].
     pub hosts: Vec<String>,
+    /// A command to be run for collecting metrics.
     pub command: String,
+    /// A list of setup commands that are run before trying to run the exporter.
     #[serde(default)]
     pub setup: Vec<String>,
 }
@@ -246,27 +248,23 @@ pub struct ExporterConfig {
 impl ExporterConfig {
     fn validate(&self, hosts: &[HostConfig]) -> Result<()> {
         // Ensure we have a valid command
-        shlex::split(&self.command).ok_or(ParseError::ValidationError(
-            format!(
-                "Invalid command for exporter {}: {}",
-                self.name, self.command
-            ),
-        ))?;
+        shlex::split(&self.command).ok_or(Error::ValidationError(format!(
+            "Invalid command for exporter {}: {}",
+            self.name, self.command
+        )))?;
 
         // Ensure we have valid setup commands
         for command in self.setup.iter() {
-            shlex::split(command).ok_or(ParseError::ValidationError(
-                format!(
-                    "Invalid setup command for exporter {}: {}",
-                    self.name, command
-                ),
-            ))?;
+            shlex::split(command).ok_or(Error::ValidationError(format!(
+                "Invalid setup command for exporter {}: {}",
+                self.name, command
+            )))?;
         }
 
         // Ensure the hosts exist
         for host in self.hosts.iter() {
             hosts.iter().find(|c_host| c_host.name == *host).ok_or(
-                ParseError::ValidationError(format!(
+                Error::ValidationError(format!(
                     "Invalid host definition for exporter {}: {}",
                     self.name, host
                 )),
@@ -277,50 +275,82 @@ impl ExporterConfig {
     }
 }
 
+/// An [`ExperimentConfig`] defines an experiment to be run. Relies on a valid [`Config`] file
+/// existing before one can be defined.
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct ExperimentConfig {
     // The ID is generated externally.
     // pub id: Option<String>,
+    /// An identifier for an experiment. The name of an experiment is with the name
+    /// given inside of a [`VariationConfig`] using a '-' character. Names must be non-empty.
     pub name: String,
+    /// A description of the experiment which may provide important information for later
+    /// reference. Descriptions may be empty.
     pub description: String,
+    /// A 'kind' is another identifier that may be useful for determining the output type of an
+    /// experiment. If the format of results changes for an experiment, it may be worth updating
+    /// the 'kind' field to indicate this.
     pub kind: String,
+    /// The [`ExperimentConfig::execute`] file points to the main shell which runs the experiment.
     pub execute: PathBuf,
     #[serde(default)]
+    /// Dependencies is a list of filepaths that the [`ExperimentConfig::execute`] script relies on. These files are
+    /// sent to remote hosts inside of a directory named *execute*-deps when an experiment begins.
+    /// For each variation/repeat of the experiment, these files are then symlinked into the
+    /// current variation directory so that the script can detect them.
     pub dependencies: Vec<PathBuf>,
+    /// Arguments contains a list of command line arguments that are sent to the [`ExperimentConfig::execute`] script.
     #[serde(default)]
     pub arguments: Vec<String>,
+    /// expected_arguments is an optional field for validating that each variation of the
+    /// experiment is providing the correct number of arguments to the [`ExperimentConfig::execute`] script.
     pub expected_arguments: Option<usize>,
+    /// runs represents the number of times an experiment should be repeated. This value can be any
+    /// number in the range [1,65536). Note that the order of runs is to perform every single
+    /// variation of an experiment and then repeat. This breadth-first ordering is generally
+    /// preferable when running experiments.
     #[serde(default = "ExperimentConfig::default_runs")]
     pub runs: u16,
+    /// Setup contains a list of scripts to run on various remote hosts for preparing an
+    /// experiment.
     #[serde(default)]
     pub setup: Vec<RemoteExecutionConfig>,
+    /// Teardown contains a list of scripts to run on various remote hosts for preparing an
+    /// experiment.
     #[serde(default)]
     pub teardown: Vec<RemoteExecutionConfig>,
+    /// Variations allow an experiment to be run with minor variations, such as changing the input
+    /// arguments/number of arguments, changing the exporters and/or changing the hosts which the
+    /// experiment runs on.
     #[serde(default)]
     pub variations: Vec<VariationConfig>,
+    /// A list of identifiers representing [`ExporterConfig`]s defined in the main [`Config`].
     #[serde(default)]
     pub exporters: Vec<String>,
+    /// A list of identifiers representing [`HostConfig`]s defined in the main [`Config`].
     #[serde(default)]
     pub hosts: Vec<String>,
 }
 
 impl FromStr for ExperimentConfig {
-    type Err = ParseError;
+    type Err = Error;
 
+    /// Allows the generation of an [`ExperimentConfig`] from a TOML string
     fn from_str(s: &str) -> Result<Self> {
         Self::parse_toml(s)
     }
 }
 
 impl ExperimentConfig {
+    /// Generates an [`ExperimentConfig`] from a TOML file.
     pub fn from_file<P: AsRef<Path>>(file: P) -> Result<Self> {
         let experiment_config_str = std::fs::read_to_string(file.as_ref())
             .map_err(|e| {
-                ParseError::from(("error reading experiment config file", e))
+                Error::from(("error reading experiment config file", e))
             })?;
 
         ExperimentConfig::parse_toml(&experiment_config_str).map_err(|e| {
-            ParseError::from((
+            Error::from((
                 format!(
                     "Error in experiment config file {}",
                     file.as_ref().display()
@@ -331,9 +361,8 @@ impl ExperimentConfig {
     }
 
     fn parse_toml(toml: &str) -> Result<Self> {
-        let experiment_config = toml::from_str::<Self>(toml).map_err(|e| {
-            ParseError::from(("Error parsing experiment config", e))
-        })?;
+        let experiment_config = toml::from_str::<Self>(toml)
+            .map_err(|e| Error::from(("Error parsing experiment config", e)))?;
 
         Ok(experiment_config)
     }
@@ -348,7 +377,7 @@ impl ExperimentConfig {
         args: &[String],
     ) -> Result<()> {
         if expected.is_some_and(|a| a != args.len()) {
-            Err(ParseError::ValidationError(format!(
+            Err(Error::ValidationError(format!(
                 "Error in experiment '{}': Expected {} arguments, got {}",
                 name,
                 expected.unwrap(),
@@ -358,12 +387,15 @@ impl ExperimentConfig {
         Ok(())
     }
 
-    /// NOTE: This function is always called BEFORE we generate experiments from the configuration,
-    /// therefore all paths must be remapped correctly within this function
+    // NOTE: This function is always called BEFORE we generate experiments from the configuration,
+    // therefore all paths must be remapped correctly within this function
+    /// Ensures that all the files required by an [`ExperimentConfig`] are actually present on
+    /// disk. This function shouldn't be used clientside, but it should be used the server which
+    /// distributes files to remote hosts during runtime.
     pub fn validate_files(&self) -> Result<()> {
         check_file_exists(&remap_filepath(&self.execute, &FileType::Execute)?)
             .map_err(|e| {
-                ParseError::from((
+                Error::from((
                     format!("Missing files for experiment '{}'", self.name),
                     e,
                 ))
@@ -373,7 +405,7 @@ impl ExperimentConfig {
 
         for setup in self.setup.iter() {
             validate_files(&setup.scripts, &FileType::Setup).map_err(|e| {
-                ParseError::from((
+                Error::from((
                     format!(
                         "Missing files in setup for experiment '{}'",
                         &self.name
@@ -386,7 +418,7 @@ impl ExperimentConfig {
         for teardown in self.teardown.iter() {
             validate_files(&teardown.scripts, &FileType::Teardown).map_err(
                 |e| {
-                    ParseError::from((
+                    Error::from((
                         format!(
                             "Missing files in teardown for experiment '{}'",
                             &self.name
@@ -400,16 +432,21 @@ impl ExperimentConfig {
         Ok(())
     }
 
-    /// Validates all members of an ExperimentConfig.
-    /// This cross-references with the Config passed in, to ensure that there
-    /// is consistency between both of the files.
-    /// Note that this function cannot check whether files exist on disk,
-    /// and the validate_files function should be used instead for this functionality.
-    /// Clients shouldn't worry about validating files in general, as they need to be uploaded to
-    /// the controller, which will check for files
+    // Validates all members of an ExperimentConfig.
+    // This cross-references with the Config passed in, to ensure that there
+    // is consistency between both of the files.
+    // Note that this function cannot check whether files exist on disk,
+    // and the validate_files function should be used instead for this functionality.
+    // Clients shouldn't worry about validating files in general, as they need to be uploaded to
+    // the controller, which will check for files
+
+    /// Ensures that all fields of an [`ExperimentConfig`] are valid.
+    ///
+    /// Any members of [`ExperimentConfig`] which are simple structs are validated here, any
+    /// complex fields are delegated to their associated struct for validation.
     pub fn validate(&self, config: &Config) -> Result<()> {
         if self.execute.clone().into_os_string().is_empty() {
-            Err(ParseError::ValidationError(
+            Err(Error::ValidationError(
                 "The 'execute' field in an experiment config cannot be empty"
                     .to_string(),
             ))?;
@@ -417,7 +454,7 @@ impl ExperimentConfig {
 
         for setup in self.setup.iter() {
             setup.validate(config, &self.name).map_err(|e| {
-                ParseError::from((
+                Error::from((
                     format!("Invalid setup for experiment '{}'", &self.name),
                     e,
                 ))
@@ -434,9 +471,9 @@ impl ExperimentConfig {
         exporters_check(&config.exporters, &self.exporters, &self.name)?;
 
         for (i, variation) in self.variations.iter().enumerate() {
-            let name = variation.name.as_ref().unwrap_or(&self.name);
+            let name = variation.name.as_ref();
             variation.validate(config, &self.name).map_err(|e| {
-                ParseError::from((
+                Error::from((
                     format!(
                         "Invalid variation (index {i}) for experiment '{}'",
                         self.name
@@ -453,7 +490,7 @@ impl ExperimentConfig {
             )?;
 
             if self.hosts.is_empty() && variation.hosts.is_empty() {
-                return Err(ParseError::ValidationError(format!(
+                return Err(Error::ValidationError(format!(
                     "No hosts have been defined for experiment '{}'",
                     self.name
                 )));
@@ -462,7 +499,7 @@ impl ExperimentConfig {
 
         for teardown in self.teardown.iter() {
             teardown.validate(config, &self.name).map_err(|e| {
-                ParseError::from((
+                Error::from((
                     format!(
                         "Invalid teardown for experiment '{}': {:?}",
                         self.name, teardown
@@ -476,8 +513,6 @@ impl ExperimentConfig {
     }
 }
 
-// fn
-
 fn hosts_check(
     c_hosts: &[HostConfig],
     hosts: &[String],
@@ -485,7 +520,7 @@ fn hosts_check(
 ) -> Result<()> {
     for host in hosts.iter() {
         if !c_hosts.iter().any(|c_host| c_host.name == *host) {
-            Err(ParseError::ValidationError(format!(
+            Err(Error::ValidationError(format!(
                 "Invalid host definition for experiment '{experiment_name}': got '{host}', expected one of {:?}",
                 c_hosts
                     .iter()
@@ -507,7 +542,7 @@ fn exporters_check(
             .iter()
             .any(|c_exporter| c_exporter.name == *exporter)
         {
-            Err(ParseError::ValidationError(format!(
+            Err(Error::ValidationError(format!(
                 "Invalid exporter for experiment '{experiment_name}': got '{exporter}', expected one of {:?}",
                 c_exporters.iter().map(|c_exporter| &c_exporter.name).collect::<Vec<&String>>()
             )))?;
@@ -516,48 +551,72 @@ fn exporters_check(
     Ok(())
 }
 
-/// Each variation of an experiment is able to override the top level of the
-/// experiment configuration. Runners will override the runners used for the
-/// specific variation, and exporters will do the same for exporters. It is
-/// an error to not define at least one runner in either the top-level or
-/// in the variation.
+// Each variation of an experiment is able to override the top level of the
+// experiment configuration. Runners will override the runners used for the
+// specific variation, and exporters will do the same for exporters. It is
+// an error to not define at least one runner in either the top-level or
+// in the variation.
+//
+//
+/// A [`VariationConfig`] defines a variation of an [`ExperimentConfig`] to be run. This allows
+/// changing the arguments fed to a test to assess different inputs, or changing the system metrics
+/// to be collected.
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct VariationConfig {
-    pub name: Option<String>,
+    /// An identifier for this variation. This identifier is joined with the upper
+    /// [`ExperimentConfig::name`] using a '-' character. It must be a non-empty String,
+    /// unique to this variation within the [`ExperimentConfig`].
+    pub name: String,
+    /// A list of identifiers representing [`HostConfig`]s defined in the main [`Config`].
     #[serde(default)]
     pub hosts: Vec<String>,
+    /// An optional integer specifying the expected number of script arguments required.
     pub expected_arguments: Option<usize>,
+    /// A list of strings containing arguments to be passed to the [`ExperimentConfig::execute`]
+    /// script.
     #[serde(default)]
     pub arguments: Vec<String>,
+    /// A list of identifiers representing [`ExporterConfig`]s defined in the main [`Config`].
     #[serde(default)]
     pub exporters: Vec<String>,
 }
 
 impl VariationConfig {
+    /// Ensures that all fields of a [`VariationConfig`] are valid.
+    ///
+    /// A [`VariationConfig`] must contain a non-empty name, and the exporters/hosts referenced in
+    /// here must also exist inside of the associated [`Config`] file.
     pub fn validate(
         &self,
         config: &Config,
         experiment_name: &str,
     ) -> Result<()> {
-        let name = match &self.name {
-            Some(name) => name,
-            None => &experiment_name.to_string(),
-        };
+        if self.name.is_empty() {
+            Err(Error::ValidationError(format!(
+                "Invalid variation for experiment '{experiment_name}': empty name",
+                )))?;
+        }
 
-        hosts_check(&config.hosts, &self.hosts, name)?;
-        exporters_check(&config.exporters, &self.exporters, name)?;
+        hosts_check(&config.hosts, &self.hosts, &self.name)?;
+        exporters_check(&config.exporters, &self.exporters, &self.name)?;
 
         Ok(())
     }
 }
 
+/// A [`RemoteExecutionConfig`] represents 1 or more scripts to be run remotely on 1 or more hosts.
+/// This struct is generally used for setup, teardown and execution of the main test script.
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct RemoteExecutionConfig {
+    /// A list of host identifiers referencing [`HostConfig`]s found inside of a [`Config`].
     pub hosts: Vec<String>,
+    /// A list of file paths representing the scripts to be run, in order, on the hosts defined in
+    /// [`RemoteExecutionConfig::hosts`].
     pub scripts: Vec<PathBuf>,
 }
 
 impl RemoteExecutionConfig {
+    #[deprecated = "Scripts are now executed directly by a shell."]
     pub fn commands(&self) -> io::Result<Vec<String>> {
         let mut commands = Vec::new();
 
@@ -585,30 +644,51 @@ fn validate_files<P: AsRef<Path>>(
 ) -> Result<()> {
     let scripts = remap_filepaths(files, file_type)?;
 
-    check_files_exist(&scripts).map_err(|e| {
-        ParseError::from((format!("Missing {} file", file_type), e))
-    })
+    check_files_exist(&scripts)
+        .map_err(|e| Error::from((format!("Missing {} file", file_type), e)))
 }
 
+/// An [`Experiment`] contains an internal representation of an [`ExperimentConfig`] after it has
+/// been validated against a [`Config`]. Once parsing is complete, an [`Experiment`] is expected to
+/// be infallible in the sense that all configuration parameters should be correct. Runtime Errors
+/// are still expected, however.
 #[derive(Debug, PartialEq)]
 pub struct Experiment {
+    // TODO(joren): Remove this?
     pub id: Option<String>,
+    /// an identifier to easily separate this experiment variation from others
     pub name: String,
+    /// A description (which may be empty) to provide more context about the current experiment
+    /// variation
     pub description: String,
+    /// A kind is a metadata field which may prove useful when experiments change their output
+    /// formats over time. This can contain any string which could help with differentiating
+    /// output formats.
     pub kind: String,
+    /// A list of [`RemoteExecution`]s for performing setup before the experiment begins.
     pub setup: Vec<RemoteExecution>,
+    /// A list of [`RemoteExecution`]s for performing teardown after the experiment ends.
     pub teardown: Vec<RemoteExecution>,
+    /// A list of [`Host`]s which are used to establish SSH connections used throughout an
+    /// experiment's runtime.
     pub hosts: Vec<Host>,
-    // Note that execute should only contain 1 script.
-    // We make it a RemoteExecution for convenience, though
+    /// A [`RemoteExecution`] for running the experiment variation. It's important to note that
+    /// execute should only ever contain one script (currently).
     pub execute: RemoteExecution,
+    /// The dependencies of the [`Experiment::execute`] script required for the experiment to run.
     pub dependencies: Vec<PathBuf>,
+    /// A list of arguments to be passed to the [`Experiment::execute`] script.
     pub arguments: Vec<String>,
+    /// An integer representing the number of arguments that should be passed to the
+    /// [`Experiment::execute`] script. Probably not required anymore.
     pub expected_arguments: Option<usize>,
+    /// A list of exporters to run in parallel to the [`Experiment::execute`] script. These
+    /// exporters collect any metrics that are auxiliary to the experiment (CPU, power).
     pub exporters: Vec<Exporter>,
 }
 
 impl Experiment {
+    /// Returns a vector containing all the unique host addresses for this experiment.
     pub fn hosts(&self) -> Vec<&String> {
         let mut hosts: Vec<&String> =
             self.hosts
@@ -636,6 +716,10 @@ impl Experiment {
     //whereas host 2 requires files B, C and D, then Host 1 and 2 should be sent the
     //corresponding 3 files each.
     //Dumb solution is good for testing though.
+    /// Returns a vector containing all the unique files for this experiment.
+    ///
+    /// This function exists so that dependencies can be uploaded to remote hosts before the
+    /// experiment begins.
     pub fn files(&self) -> Vec<&Path> {
         let mut files: Vec<&Path> = self
             .execute
@@ -657,47 +741,18 @@ impl Experiment {
     }
 }
 
+/// A [`Host`] is similar to a [`HostConfig`] (currently identical), except for the fact that it is
+/// not meant to be Serialized/Deserialized, and is meant to be an internal representation of a
+/// Host, after parsing is complete.
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 pub struct Host {
     pub name: String,
     pub address: String,
 }
 
-// impl Runner {
-//     // pub fn new(name: &'a str, address: &'a str, port: &'a u16) -> Self {
-//     //     Self {
-//     //         name,
-//     //         address,
-//     //         port,
-//     //     }
-//     // }
-//
-//     // pub fn url(&self) -> String {
-//     //     format!("http://{}:{}", self.address, self.port)
-//     // }
-// }
-
-// #[derive(Debug, Hash, Eq, PartialEq)]
-// pub struct Runner<'a> {
-//     pub name: &'a str,
-//     pub address: &'a str,
-//     pub port: &'a u16,
-// }
-//
-// impl<'a> Runner<'a> {
-//     pub fn new(name: &'a str, address: &'a str, port: &'a u16) -> Self {
-//         Self {
-//             name,
-//             address,
-//             port,
-//         }
-//     }
-//
-//     pub fn url(&self) -> String {
-//         format!("http://{}:{}", self.address, self.port)
-//     }
-// }
-
+/// An [`Exporter`] is nearly identical to a [`ExporterConfig`], except for the [`Exporter::hosts`]
+/// field, which contains full hosts instead of identifiers, making it a bit easier to use in
+/// practice.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Exporter {
     pub name: String,
@@ -722,10 +777,17 @@ impl Exporter {
         }
     }
 }
+
+/// A [`RemoteExecution`] is similar to a [`RemoteExecutionConfig`], except it contains an
+/// additional field to state what kind of file/files are being used. Refer to [`FileType`] for
+/// more information.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RemoteExecution {
+    /// A list of [`Host`]s for remote connections.
     pub hosts: Vec<Host>,
+    /// A list of scripts to be run on the [`RemoteExecution::hosts`].
     pub scripts: Vec<PathBuf>,
+    /// A [`FileType`] stating the nature of the scripts in this struct.
     pub re_type: FileType,
 }
 
@@ -738,6 +800,8 @@ impl RemoteExecution {
         }
     }
 
+    /// Since scripts are stored as absolute paths, this function just returns a vector, taking
+    /// only the filename of each script.
     pub fn remote_scripts(&self) -> Vec<PathBuf> {
         //TODO(joren): Decide whether it would be worth organising scripts into
         //setup/teardown/execute directories when they are on remotes.
@@ -755,11 +819,17 @@ impl RemoteExecution {
     }
 }
 
+/// Describes the significance of a file for remote use.
 #[derive(Clone, Debug, PartialEq)]
 pub enum FileType {
+    /// Setup files are used during the setup stage of an experiment.
     Setup,
+    /// Teardown files are used during the teardown stage of an experiment.
     Teardown,
+    /// Execute files are the main script to be run for an experiment.
     Execute,
+    /// Dependency files are (currently) files that are required for the main script of an
+    /// experiment to function correctly. In the future dependencies may exist more broadly.
     Dependency,
 }
 
@@ -775,14 +845,14 @@ impl Display for FileType {
 }
 
 impl FromStr for FileType {
-    type Err = ParseError;
+    type Err = Error;
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         let re_type = match s {
             "setup" => Self::Setup,
             "teardown" => Self::Teardown,
             "execute" => Self::Execute,
             "dependency" => Self::Dependency,
-            &_ => Err(ParseError::ValidationError(format!(
+            &_ => Err(Error::ValidationError(format!(
                 "Invalid remote execution type, got {s}"
             )))?,
         };
@@ -792,11 +862,11 @@ impl FromStr for FileType {
 }
 
 impl TryFrom<&Path> for FileType {
-    type Error = ParseError;
+    type Error = Error;
     fn try_from(value: &Path) -> std::result::Result<Self, Self::Error> {
         let filename = value
             .file_name()
-            .ok_or(ParseError::ValidationError(
+            .ok_or(Error::ValidationError(
                 "Tried to parse a file type from a non-file path".to_string(),
             ))?
             .to_string_lossy();
@@ -917,8 +987,18 @@ fn remap_filepath<P: AsRef<Path>>(
     Ok(std::path::absolute(new_path)?)
 }
 
+/// A type representing a list of experiment variations and the number of times that they need to
+/// be run.
 pub type ExperimentRuns = (u16, Vec<Experiment>);
 
+/// Generates a list of [`Experiment`]s based on a [`Config`] and an [`ExperimentConfig`].
+/// All fields are owned, so they are cloned from the config/experiment config as required.
+///
+/// Currently an experiment without any variations cannot be turned into an experiment at all. This
+/// functionality is likely to change in the future, so that a valid top-level experiment in an
+/// experiment config can be turned into an experiment as well.
+///
+/// NOTE: This function should only be run AFTER config/experiment config validation has been done.
 pub fn generate_experiments(
     config: &Config,
     experiment_config: &ExperimentConfig,
@@ -935,10 +1015,8 @@ pub fn generate_experiments(
     let mut experiments = Vec::with_capacity(variations.len());
 
     for variation in experiment_config.variations.iter() {
-        let name = match &variation.name {
-            Some(name) => name,
-            None => name,
-        };
+        let name = format!("{name}-{}", &variation.name);
+
         let expected_arguments = variation
             .expected_arguments
             .or(experiment_config.expected_arguments);
@@ -962,7 +1040,7 @@ pub fn generate_experiments(
 
         experiments.push(Experiment {
             id: None,
-            name: name.clone(),
+            name: name,
             description: description.clone(),
             kind: kind.clone(),
             setup: map_remote_executions(config, setup, FileType::Setup)?,
@@ -1102,28 +1180,28 @@ mod tests {
                     }
                 ],
                 variations: vec![VariationConfig {
-                    name: None,
+                    name: "base".into(),
                     hosts: vec![],
                     expected_arguments: None,
                     arguments: vec![],
                     exporters: vec![]
                     },
                     VariationConfig {
-                        name: Some("different args".into()),
+                        name: "different args".into(),
                         hosts: vec![],
                         expected_arguments: Some(1),
                         arguments: vec!["Argument 1".into()],
                         exporters: vec![]
                     },
                     VariationConfig {
-                        name: Some("with exporter".into()),
+                        name: "with exporter".into(),
                         hosts: vec![],
                         expected_arguments: None,
                         arguments: vec![],
                         exporters: vec!["test-exporter".into()]
                     },
                     VariationConfig {
-                        name: Some("with multiple exporters".into()),
+                        name: "with multiple exporters".into(),
                         hosts: vec![],
                         expected_arguments: None,
                         arguments: vec![],
@@ -1226,7 +1304,7 @@ mod tests {
         let expected_experiments = vec![
             Experiment {
                 id: None,
-                name: "localhost-experiment".to_string(),
+                name: "localhost-experiment-base".to_string(),
                 description: "Testing the functionality of the software completely using localhost".into(),
                 kind: "localhost-result".into(),
                 setup: remote_executions["setup"].clone(),
@@ -1240,7 +1318,7 @@ mod tests {
             },
             Experiment {
                 id: None,
-                name: "different args".to_string(),
+                name: "localhost-experiment-different args".to_string(),
                 description: "Testing the functionality of the software completely using localhost".into(),
                 kind: "localhost-result".into(),
                 setup: remote_executions["setup"].clone(),
@@ -1254,7 +1332,7 @@ mod tests {
             },
             Experiment {
                 id: None,
-                name: "with exporter".to_string(),
+                name: "localhost-experiment-with exporter".to_string(),
                 description: "Testing the functionality of the software completely using localhost".into(),
                 kind: "localhost-result".into(),
                 setup: remote_executions["setup"].clone(),
@@ -1268,7 +1346,7 @@ mod tests {
             },
             Experiment {
                 id: None,
-                name: "with multiple exporters".to_string(),
+                name: "localhost-experiment-with multiple exporters".to_string(),
                 description: "Testing the functionality of the software completely using localhost".into(),
                 kind: "localhost-result".into(),
                 setup: remote_executions["setup"].clone(),

@@ -1,3 +1,15 @@
+//! Experimentah is a framework for running custom experiments on remote hosts, often required
+//! during research, whilst also allowing the collection of additional metrics (such as CPU and
+//! power usage) without requiring this functionality in the main experiment script.
+//!
+//! SSH is key to the use of Experimentah. Commands are executed on remote hosts through the use of
+//! SSH sessions and shell scripts.
+//!
+//! The controller is a HTTP server that allows experiment configuration files to be sent over the
+//! network from other tools, executing the experiments that they define. The controller also
+//! provides endpoints for checking the experiment status, retrieving the stdout/stderr from a
+//! current/previous experiment and retrieving the results of a current/previous experiment.
+
 use std::{
     path::{Path, PathBuf},
     time::{Duration, SystemTime, SystemTimeError, UNIX_EPOCH},
@@ -19,7 +31,7 @@ pub mod ssh;
 /// - storage/dependencies - Contains script dependencies
 ///
 /// Some important files are:
-/// - storage/<DATABASE>
+/// - storage/DATABASE
 pub const STORAGE_DIR: &str = "storage";
 
 /// We want all our remote operations to occur in a well-known directory, so that we can avoid.
@@ -31,7 +43,7 @@ pub const STORAGE_DIR: &str = "storage";
 pub const REMOTE_DIR: &str = "/srv/experimentah";
 
 /// The results directory should be relative to both:
-/// - the variation directory: /srv/experimentah/<timestamp>/<repeat>/results
+/// - the variation directory: /srv/experimentah/TIMESTAMP/REPEAT_NO/results
 /// - the controller storage directory: storage/results
 pub const RESULTS_DIR: &str = "results";
 

@@ -495,7 +495,7 @@ async fn remote_background_command(
 
 /// Makes multiple directories at once in parallel across the sessions passed in.
 /// This means if 8 directories need to be made on 3 hosts,
-/// all 3 hosts will run the 'mkdir -p <directory>*8' command in parallel.
+/// all 3 hosts will run the 'mkdir -p {DIRECTORY1..DIRECTORY8}' command in parallel.
 pub async fn make_directories(
     sessions: &Sessions,
     paths: &[&Path],
@@ -888,7 +888,7 @@ pub async fn run_script_at(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    // use super::*;
 
     // Implicitly tested in the run_* tests
     // #[tokio::test]

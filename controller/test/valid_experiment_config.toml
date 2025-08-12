@@ -15,6 +15,7 @@ runs = 1
 hosts = ["runner1"]
 scripts = ["./scripts/test-setup.sh"]
 [[variations]]
+name = "base"
 # This empty variation will inherit all the top-level fields
 [[variations]]
 name = "different args"
