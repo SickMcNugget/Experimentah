@@ -1,7 +1,7 @@
 //! Functionality for SSH operations, such as running commands, creating background processes,
 //! making directories, downloading files, etc. is provided in this module.
 
-use openssh::{Child, KnownHosts};
+use openssh::{Child, KnownHosts, Stdio};
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -44,6 +44,159 @@ impl SFTPSession {
         }
     }
 }
+
+/// A [`ShellCommand`] is a helper for constructing common commands that we use throughout Experimentah.
+/// It is essentially a builder for Vec<String> outputs that we can use in multiple SSH functions.
+#[derive(Default, Clone)]
+pub struct ShellCommand {
+    interpreter: &'static str,
+    command: String,
+    args: Vec<String>,
+    working_directory: Option<PathBuf>,
+    stdout_file: Option<PathBuf>,
+    stderr_file: Option<PathBuf>,
+}
+
+impl ShellCommand {
+    // Constructs a new ShellCommand builder with a command
+    pub fn from_command<S: AsRef<str>>(command: S) -> Self {
+        Self {
+            interpreter: INTERPRETER,
+            command: command.as_ref().to_string(),
+            ..Default::default()
+        }
+    }
+
+    pub fn from_command_args<S: AsRef<str>>(command_args: &[S]) -> Self {
+        assert!(command_args.len() >= 2);
+        let (command, args) = command_args.split_first().unwrap();
+        Self {
+            interpreter: INTERPRETER,
+            command: command.as_ref().to_string(),
+            args: args.iter().map(|arg| arg.as_ref().to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    pub fn command<S: AsRef<str>>(mut self, command: S) -> Self {
+        self.command = command.as_ref().to_string();
+        self
+    }
+
+    pub fn args<S: AsRef<str>>(mut self, args: &[S]) -> Self {
+        self.args = args.iter().map(|arg| arg.as_ref().to_string()).collect();
+        self
+    }
+
+    pub fn command_args<S: AsRef<str>>(mut self, command_args: &[S]) -> Self {
+        assert!(command_args.len() >= 1);
+        let (command, args) = command_args.split_first().unwrap();
+        self.command = command.as_ref().to_string();
+        self.args = args.iter().map(|arg| arg.as_ref().to_string()).collect();
+        self
+    }
+
+    pub fn interpreter(mut self, interpreter: &'static str) -> Self {
+        assert!(interpreter == "sh" || interpreter == "bash");
+        self.interpreter = interpreter;
+        self
+    }
+
+    pub fn working_directory<P: AsRef<Path>>(
+        mut self,
+        working_directory: P,
+    ) -> Self {
+        self.working_directory = Some(working_directory.as_ref().into());
+        self
+    }
+
+    pub fn stdout_file<P: AsRef<Path>>(mut self, stdout_file: P) -> Self {
+        self.stdout_file = Some(stdout_file.as_ref().into());
+        self
+    }
+
+    pub fn stderr_file<P: AsRef<Path>>(mut self, stderr_file: P) -> Self {
+        self.stderr_file = Some(stderr_file.as_ref().into());
+        self
+    }
+
+    pub fn build(&self) -> Vec<String> {
+        let mut shell_command = vec![];
+        if let Some(working_directory) = &self.working_directory {
+            shell_command.push("cd".into());
+            shell_command.push(working_directory.to_string_lossy().into());
+            shell_command.push("&&".into());
+        }
+        shell_command.push(self.interpreter.to_string());
+        shell_command.push("-c".into());
+        shell_command.push(self.command.clone());
+        for arg in self.args.iter() {
+            shell_command.push(arg.clone());
+        }
+
+        if let Some(stdout_file) = &self.stdout_file {
+            shell_command.push(">".into());
+            shell_command.push(stdout_file.to_string_lossy().into());
+        }
+
+        if let Some(stderr_file) = &self.stderr_file {
+            shell_command.push("2>".into());
+            shell_command.push(stderr_file.to_string_lossy().into());
+        }
+
+        shell_command
+    }
+
+    // pub fn build_tokio_command(&self) {}
+
+    pub fn build_remote_arc_command(
+        &self,
+        session: &Session,
+    ) -> openssh::OwningCommand<Arc<openssh::Session>> {
+        let comm_args = self.build();
+        let (comm, args) = comm_args.split_at(1);
+        let comm = comm.first().unwrap();
+        let mut owned_comm = session.session.clone().arc_command(comm);
+        owned_comm
+            .args(args)
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        owned_comm
+    }
+
+    pub fn build_remote_command<'a>(
+        &self,
+        session: &'a Session,
+    ) -> openssh::OwningCommand<&'a openssh::Session> {
+        let comm_args = self.build();
+        let (comm, args) = comm_args.split_at(1);
+        let comm = comm.first().unwrap();
+        let mut owned_comm = session.session.command(comm);
+        owned_comm
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        owned_comm
+    }
+}
+
+// impl<'a> Default for ShellCommand<'a> {
+//     fn default() -> Self {
+//         Self {
+//             interpreter: INTERPRETER,
+//             working_directory: None,
+//             stdout_file: None,
+//             stderr_file: None,
+//             command: "".to_string(),
+//             args:
+//
+//         }
+//     }
+// }
 
 // TODO(joren): SSH also handles local commands,
 // it might be a good idea to change the name of this enum to reflect that

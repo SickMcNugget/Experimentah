@@ -791,6 +791,14 @@ impl Exporter {
             setup,
         }
     }
+
+    /// Returns the filenames for the redirected stdout and stderr streams
+    pub fn redir_files(&self) -> (String, String) {
+        (
+            format!("{}.stdout", self.name),
+            format!("{}.stderr", self.name),
+        )
+    }
 }
 
 /// A [`RemoteExecution`] is similar to a [`RemoteExecutionConfig`], except it contains an

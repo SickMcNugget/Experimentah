@@ -520,16 +520,15 @@ impl ExperimentRunner {
                 .await?;
             }
 
-            //TODO(joren): Handle shlex error
-            let comm = shlex::split(&exporter.command).unwrap();
+            let (stdout, stderr) = exporter.redir_files();
 
-            // This process should link us to the exporter that was started remotely
-            // let running_exporters = ssh::run_background_command_at(
-            //     &exporter_sessions,
-            //     &comm,
-            //     variation_directory,
-            // )
-            // .await?;
+            //TODO(joren): Handle shlex error
+            let comm: Vec<String> = shlex::split(&exporter.command)
+                .unwrap()
+                .into_iter()
+                .chain([format!(">{stdout}"), format!("2>{stderr}")])
+                .collect();
+
             let exporter_processes = ssh::run_background_command_at(
                 &exporter_sessions,
                 &comm,
