@@ -5,7 +5,7 @@
 	import * as Card from '$lib/components/ui/card/index.js';
 	import { Upload } from '@lucide/svelte';
 
-	let { configType }: { configType: string } = $props();
+	let { configType, onUpload }: { configType: 'infrastructure' | 'experiment'; onUpload?: (file: File) => void } = $props();
 </script>
 
 <Card.Root class="w-full">
@@ -29,7 +29,10 @@
 					accept=".toml"
 					class="hidden"
 					onchange={(e) => {
-						// TODO
+						const input = e.currentTarget as HTMLInputElement;
+						const file = input.files?.[0];
+						if (file) onUpload?.(file);
+						input.value = '';
 					}}
 				/>
 			</label>
