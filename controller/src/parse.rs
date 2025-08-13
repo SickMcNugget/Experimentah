@@ -470,6 +470,8 @@ impl ExperimentConfig {
         hosts_check(&config.hosts, &self.hosts, &self.name)?;
         exporters_check(&config.exporters, &self.exporters, &self.name)?;
 
+        // Ensure that all variations are valid,
+        // and also ensure that no 2 variations have the same name
         for (i, variation) in self.variations.iter().enumerate() {
             let name = variation.name.as_ref();
             variation.validate(config, &self.name).map_err(|e| {
@@ -495,6 +497,19 @@ impl ExperimentConfig {
                     self.name
                 )));
             }
+        }
+
+        let mut names: Vec<&String> = self
+            .variations
+            .iter()
+            .map(|variation| &variation.name)
+            .collect();
+        names.sort_unstable();
+        names.dedup();
+        if names.len() != self.variations.len() {
+            return Err(Error::ValidationError(format!(
+                "There were variations with duplicate names for experiment '{}'", self.name
+            )));
         }
 
         for teardown in self.teardown.iter() {

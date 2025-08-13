@@ -18,7 +18,7 @@ const MAX_EXPERIMENTS: usize = 32;
 /// checks on the queue.
 const RUN_POLL_SLEEP: Duration = Duration::from_millis(250);
 
-use log::{error, info};
+use log::{debug, error, info};
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::path::PathBuf;
@@ -309,6 +309,10 @@ impl ExperimentRunner {
                         variation_directory,
                     )
                     .await?;
+                    debug!(
+                        "Symlinked dependencies for '{:?}': {:?}",
+                        &experiment.execute, &experiment.dependencies
+                    );
 
                     let _exporters = Self::start_exporters(
                         &sessions,
@@ -317,6 +321,7 @@ impl ExperimentRunner {
                         variation_directory,
                     )
                     .await?;
+                    info!("Started exporters");
 
                     // TODO(joren): We want to make sure that our setup/teardown
                     // is run from the *variation* directory, and not the experiment
@@ -356,8 +361,18 @@ impl ExperimentRunner {
                     .await?;
                     info!("Variation teardown complete");
 
+                    Self::unlink_dependencies(
+                        &sessions,
+                        &experiment.execute,
+                        &experiment.dependencies,
+                        variation_directory,
+                    )
+                    .await?;
+                    debug!("Unliked dependencies for variation");
+
                     Self::collect_results(&sessions, variation_directory)
                         .await?;
+                    info!("Collected results for variation");
                 }
             }
             info!("Finished experiments");
@@ -449,7 +464,6 @@ impl ExperimentRunner {
                     .to_string_lossy()
                     .to_string(),
             );
-            dbg!(&command_args);
             ssh::run_command_at(sessions, &command_args, experiment_directory)
                 .await?;
         }
@@ -632,6 +646,26 @@ impl ExperimentRunner {
         ];
         for dependency in dependencies.iter() {
             let dep = deps_path.join(dependency.file_name().unwrap());
+            command.push(dep.to_string_lossy().to_string());
+        }
+
+        ssh::run_command(&filter_sessions, &command)
+            .await
+            .map_err(Error::from)
+    }
+
+    async fn unlink_dependencies(
+        sessions: &Sessions,
+        remote_execution: &RemoteExecution,
+        dependencies: &[PathBuf],
+        variation_directory: &Path,
+    ) -> Result<()> {
+        let filter_sessions =
+            Self::filter_host_sessions(sessions, &remote_execution.hosts);
+
+        let mut command = vec!["rm".to_string()];
+        for dependency in dependencies.iter() {
+            let dep = variation_directory.join(dependency.file_name().unwrap());
             command.push(dep.to_string_lossy().to_string());
         }
 

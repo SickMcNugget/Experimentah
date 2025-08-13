@@ -109,6 +109,18 @@ fn variation_dir_parts(variation_directory: &Path) -> (String, u16, u128) {
     (experiment_name, run, ts)
 }
 
+/// Convert a filename into a folder name for storing dependencies related to the file
+///
+/// # Examples
+/// ```
+/// let directory = Path::new("/srv/experimentah/important_directory");
+/// let file = Path::new("/srv/experimentah/important_directory/myfile.sh");
+/// // OR
+/// let file = Path::new("myfile.sh");
+///
+/// let deps_path = file_to_deps_path(directory, file);
+/// // "/srv/experimentah/important_directory/myfile.sh-deps"
+/// ```
 fn file_to_deps_path(experiment_directory: &Path, file: &Path) -> PathBuf {
     let filename = file.file_name().unwrap();
     experiment_directory.join(format!("{}-deps", filename.to_string_lossy()))
