@@ -1,6 +1,0 @@
-{
-    "commands": [
-        "bash -c 'echo hello'",
-        "bash -c 'echo world!'"
-    ]
-}

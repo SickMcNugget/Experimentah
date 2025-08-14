@@ -113,6 +113,9 @@ fn variation_dir_parts(variation_directory: &Path) -> (String, u16, u128) {
 ///
 /// # Examples
 /// ```
+/// use std::path::Path;
+/// use controller::file_to_deps_path;
+///
 /// let directory = Path::new("/srv/experimentah/important_directory");
 /// let file = Path::new("/srv/experimentah/important_directory/myfile.sh");
 /// // OR
@@ -121,7 +124,7 @@ fn variation_dir_parts(variation_directory: &Path) -> (String, u16, u128) {
 /// let deps_path = file_to_deps_path(directory, file);
 /// // "/srv/experimentah/important_directory/myfile.sh-deps"
 /// ```
-fn file_to_deps_path(experiment_directory: &Path, file: &Path) -> PathBuf {
+pub fn file_to_deps_path(experiment_directory: &Path, file: &Path) -> PathBuf {
     let filename = file.file_name().unwrap();
     experiment_directory.join(format!("{}-deps", filename.to_string_lossy()))
 }
