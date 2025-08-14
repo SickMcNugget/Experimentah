@@ -1,3 +1,6 @@
+pub mod common;
+
+use crate::common::{test_path, VALID_CONFIG, VALID_EXPERIMENT_CONFIG};
 use std::{collections::HashMap, path::PathBuf, str::FromStr};
 
 use controller::parse::{
@@ -6,17 +9,8 @@ use controller::parse::{
     RemoteExecutionConfig, VariationConfig,
 };
 
-const VALID_CONFIG: &str = "valid_config.toml";
-const VALID_EXPERIMENT_CONFIG: &str = "valid_experiment_config.toml";
-
-fn test_path() -> PathBuf {
-    dbg!(std::env::var("CARGO_MANIFEST_DIR").unwrap());
-    PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("tests")
-}
-
 #[test]
 fn parse_config() {
-    dbg!(test_path());
     let config = match Config::from_file(test_path().join(VALID_CONFIG)) {
         Ok(config) => config,
         Err(e) => panic!("A valid config failed to be validated: {e}"),
@@ -85,7 +79,7 @@ fn parse_experiment_config() {
                 name: "localhost-experiment".into(),
                 description: "Testing the functionality of the software completely using localhost".into(),
                 kind: "localhost-result".into(),
-                execute: "./scripts/actual-work.sh".into(),
+                execute: "actual-work.sh".into(),
                 dependencies: vec![],
                 expected_arguments: Some(2),
                 arguments: vec!["Argument 1".into(), "Argument 2".into()],
@@ -94,7 +88,7 @@ fn parse_experiment_config() {
                 runs: 1,
                 setup: vec![RemoteExecutionConfig {
                         hosts: hosts.clone(),
-                        scripts: vec!["./scripts/test-setup.sh".into()]
+                        scripts: vec!["test-setup.sh".into()]
                     }
                 ],
                 variations: vec![VariationConfig {
@@ -128,7 +122,7 @@ fn parse_experiment_config() {
                 ],
                 teardown: vec![RemoteExecutionConfig{
                         hosts: hosts.clone(),
-                        scripts: vec!["./scripts/test-teardown.sh".into()]
+                        scripts: vec!["test-teardown.sh".into()]
                 }],
             };
 
@@ -164,9 +158,9 @@ fn to_experiments() {
     }
 
     let experiments =
-        generate_experiments(&config, &experiment_config).unwrap();
+        generate_experiments(&config, &experiment_config, test_path()).unwrap();
 
-    let basepath = std::path::absolute(PathBuf::from("storage")).unwrap();
+    let basepath = test_path();
 
     let re_host = Host {
         name: "runner1".to_string(),

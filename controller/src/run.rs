@@ -4,19 +4,20 @@ use crate::parse::{
     Experiment, ExperimentRuns, Exporter, Host, RemoteExecution,
 };
 use crate::{
-    file_to_deps_path, time_since_epoch, variation_dir_parts, EXPORTER_DIR,
-    REMOTE_DIR,
+    file_to_deps_path, time_since_epoch, variation_dir_parts,
+    DEFAULT_EXPORTER_DIR, DEFAULT_REMOTE_DIR, DEFAULT_RESULTS_DIR,
+    DEFAULT_STORAGE_DIR,
 };
 
 /// Internally I've just set the queue to begin with a capacity of 32 potential [`ExperimentRuns`].
 /// This isn't actually a cap on the number of experiments that can be run, but potentially in the
 /// future we may have some guidance as to what a reasonable limit should be.
-const MAX_EXPERIMENTS: usize = 32;
+const DEFAULT_MAX_EXPERIMENTS: usize = 32;
 
 /// When there are no experiments inside of the experiment queue, we poll the queue periodically to
 /// determine whether there are any experiments available. This is the delay between successive
 /// checks on the queue.
-const RUN_POLL_SLEEP: Duration = Duration::from_millis(250);
+const DEFAULT_POLL_SLEEP: Duration = Duration::from_millis(250);
 
 use log::{debug, error, info};
 use std::collections::{HashMap, VecDeque};
@@ -27,7 +28,6 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 
 use crate::ssh::{self, BackgroundProcesses, Sessions};
-use crate::{RESULTS_DIR, STORAGE_DIR};
 
 /// A specialised [`Result`] type for runtime problems with experiments
 ///
@@ -157,17 +157,58 @@ pub struct ExperimentRunner {
     pub current_run: AtomicU16,
     /// The queue containing experiments sent in from clients.
     pub experiment_queue: ExperimentQueue,
+
+    pub configuration: ExperimentRunnerConfiguration,
+}
+
+/// The [`ExperimentRunner`] requires a great deal of configuration options (paths, etc) which it
+/// must maintain a reference to. These fields are stored in this configuration struct.
+pub struct ExperimentRunnerConfiguration {
+    /// The amount of time to wait when checking the ExperimentRunner queue for new experiments.
+    pub poll_sleep: Duration,
+    /// The maximum number of experiments that can be stored at one time within the
+    /// ExperimentRunner queue.
+    pub max_experiments: usize,
+    /// The storage directory to use for storing experiment data
+    pub storage_dir: PathBuf,
+    /// The subdirectory underneath [`Self::storage_dir`] and [`Self::remote_dir`] which experiment
+    /// results are stored in
+    pub results_dir: PathBuf,
+    /// The directory to use on remote hosts when running experiments.
+    ///
+    /// NOTE: This is likely to be deprecated in favour of a directory that an SSH user is
+    /// guaranteed to have access to. (likely to be either $HOME or /tmp).
+    pub remote_dir: PathBuf,
+    /// The subdirectory underneath [`Self::remote_dir`] to store information relating to currently
+    /// running exporters.
+    pub exporter_dir: PathBuf,
+}
+
+impl Default for ExperimentRunnerConfiguration {
+    fn default() -> Self {
+        Self {
+            poll_sleep: DEFAULT_POLL_SLEEP,
+            max_experiments: DEFAULT_MAX_EXPERIMENTS,
+            storage_dir: PathBuf::from(DEFAULT_STORAGE_DIR),
+            results_dir: PathBuf::from(DEFAULT_RESULTS_DIR),
+            remote_dir: PathBuf::from(DEFAULT_REMOTE_DIR),
+            exporter_dir: PathBuf::from(DEFAULT_EXPORTER_DIR),
+        }
+    }
 }
 
 impl Default for ExperimentRunner {
     fn default() -> Self {
+        let configuration: ExperimentRunnerConfiguration = Default::default();
+
         Self {
-            current_experiment: Mutex::new(None),
-            current_runs: 0.into(),
-            current_run: 0.into(),
             experiment_queue: Mutex::new(VecDeque::with_capacity(
-                MAX_EXPERIMENTS,
+                configuration.max_experiments,
             )),
+            configuration,
+            current_runs: Default::default(),
+            current_experiment: Default::default(),
+            current_run: Default::default(),
         }
     }
 }
@@ -191,7 +232,7 @@ impl ExperimentRunner {
                         .store(experiment_runs.0, Ordering::Relaxed);
                     return experiment_runs;
                 }
-                None => tokio::time::sleep(RUN_POLL_SLEEP).await,
+                None => tokio::time::sleep(self.configuration.poll_sleep).await,
             }
         }
     }
@@ -258,13 +299,18 @@ impl ExperimentRunner {
             let hosts = Self::unique_hosts_for_all_experiments(&experiments);
             let sessions = ssh::connect_to_hosts(&hosts).await?;
 
-            let experiment_directory =
-                PathBuf::from(format!("{REMOTE_DIR}/{ts}"));
+            let experiment_directory = PathBuf::from(format!(
+                "{}/{ts}",
+                self.configuration.remote_dir.display()
+            ));
 
             // Ensure that our 'well-known' directories are present
             ssh::make_directories(
                 &sessions,
-                &[Path::new(REMOTE_DIR), Path::new(EXPORTER_DIR)],
+                &[
+                    &self.configuration.remote_dir,
+                    &self.configuration.exporter_dir,
+                ],
             )
             .await?;
 
@@ -370,8 +416,17 @@ impl ExperimentRunner {
                     .await?;
                     debug!("Unliked dependencies for variation");
 
-                    Self::collect_results(&sessions, variation_directory)
-                        .await?;
+                    let result_directory = &self
+                        .configuration
+                        .storage_dir
+                        .join(&self.configuration.results_dir);
+
+                    Self::collect_results(
+                        &sessions,
+                        variation_directory,
+                        result_directory,
+                    )
+                    .await?;
                     info!("Collected results for variation");
                 }
             }
@@ -676,6 +731,7 @@ impl ExperimentRunner {
     async fn collect_results(
         sessions: &Sessions,
         variation_directory: &Path,
+        results_dir: &Path,
     ) -> Result<()> {
         let (experiment_name, run, ts) =
             variation_dir_parts(variation_directory);
@@ -685,10 +741,9 @@ impl ExperimentRunner {
             experiment_name, run
         );
 
-        let local_results_dir = std::path::absolute(PathBuf::from(format!(
-            "{}/{}/{}/{}/{}",
-            STORAGE_DIR, RESULTS_DIR, ts, run, experiment_name
-        )))
+        let local_results_dir = std::path::absolute(
+            results_dir.join(format!("{ts}/{run}/{experiment_name}")),
+        )
         .map_err(|e| {
             Error::from((
                 "Failed to canonicalize local results dir".to_string(),

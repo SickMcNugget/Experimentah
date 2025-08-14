@@ -18,6 +18,7 @@ use std::{
 #[allow(dead_code)]
 pub mod db;
 pub mod parse;
+pub mod routes;
 pub mod run;
 pub mod ssh;
 
@@ -33,7 +34,7 @@ pub mod ssh;
 ///
 /// Some important files are:
 /// - storage/DATABASE
-pub const STORAGE_DIR: &str = "storage";
+pub const DEFAULT_STORAGE_DIR: &str = "storage";
 
 /// We want all our remote operations to occur in a well-known directory, so that we can avoid.
 ///
@@ -41,12 +42,12 @@ pub const STORAGE_DIR: &str = "storage";
 ///
 /// As such, we use `/srv/experimentah` as the base directory for our remote operations.
 /// Any subdirectories created within `/srv/experimentah` are deleted once results are retrieved.
-pub const REMOTE_DIR: &str = "/srv/experimentah";
+pub const DEFAULT_REMOTE_DIR: &str = "/srv/experimentah";
 
 /// The results directory should be relative to both:
 /// - the variation directory: /srv/experimentah/TIMESTAMP/REPEAT_NO/results
 /// - the controller storage directory: storage/results
-pub const RESULTS_DIR: &str = "results";
+pub const DEFAULT_RESULTS_DIR: &str = "results";
 
 /// We need a way to determine if any exporters are currently running on our remote machines
 /// (meaning that they were launched by Experimentah in either the current session or a previous
@@ -54,7 +55,7 @@ pub const RESULTS_DIR: &str = "results";
 ///
 /// To do so, we use advisory locks inside this directory to state that the process is, in fact,
 /// currently running.
-pub const EXPORTER_DIR: &str = "/srv/experimentah/live_exporters";
+pub const DEFAULT_EXPORTER_DIR: &str = "/srv/experimentah/live_exporters";
 
 /// By default, we currently assume that bash is the default interpreter and that it will be
 /// available on PATH in some manner by the remote SSH user.

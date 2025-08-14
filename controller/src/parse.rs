@@ -10,8 +10,6 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::{fs, io};
 
-use crate::STORAGE_DIR;
-
 /// A specialised [`Result`] type for Parsing operations.
 ///
 /// This type is broadly used across [`crate::parse`] for any operation which may produce an
@@ -392,41 +390,53 @@ impl ExperimentConfig {
     /// Ensures that all the files required by an [`ExperimentConfig`] are actually present on
     /// disk. This function shouldn't be used clientside, but it should be used the server which
     /// distributes files to remote hosts during runtime.
-    pub fn validate_files(&self) -> Result<()> {
-        check_file_exists(&remap_filepath(&self.execute, &FileType::Execute)?)
-            .map_err(|e| {
-                Error::from((
-                    format!("Missing files for experiment '{}'", self.name),
-                    e,
-                ))
-            })?;
+    pub fn validate_files<P: AsRef<Path>>(&self, storage_dir: P) -> Result<()> {
+        check_file_exists(&remap_filepath(
+            &self.execute,
+            &FileType::Execute,
+            &storage_dir,
+        )?)
+        .map_err(|e| {
+            Error::from((
+                format!("Missing files for experiment '{}'", self.name),
+                e,
+            ))
+        })?;
 
-        validate_files(&self.dependencies, &FileType::Dependency)?;
+        validate_files(
+            &self.dependencies,
+            &FileType::Dependency,
+            &storage_dir,
+        )?;
 
         for setup in self.setup.iter() {
-            validate_files(&setup.scripts, &FileType::Setup).map_err(|e| {
+            validate_files(&setup.scripts, &FileType::Setup, &storage_dir)
+                .map_err(|e| {
+                    Error::from((
+                        format!(
+                            "Missing files in setup for experiment '{}'",
+                            &self.name
+                        ),
+                        e,
+                    ))
+                })?;
+        }
+
+        for teardown in self.teardown.iter() {
+            validate_files(
+                &teardown.scripts,
+                &FileType::Teardown,
+                &storage_dir,
+            )
+            .map_err(|e| {
                 Error::from((
                     format!(
-                        "Missing files in setup for experiment '{}'",
+                        "Missing files in teardown for experiment '{}'",
                         &self.name
                     ),
                     e,
                 ))
             })?;
-        }
-
-        for teardown in self.teardown.iter() {
-            validate_files(&teardown.scripts, &FileType::Teardown).map_err(
-                |e| {
-                    Error::from((
-                        format!(
-                            "Missing files in teardown for experiment '{}'",
-                            &self.name
-                        ),
-                        e,
-                    ))
-                },
-            )?;
         }
 
         Ok(())
@@ -653,11 +663,16 @@ impl RemoteExecutionConfig {
     }
 }
 
-fn validate_files<P: AsRef<Path>>(
+fn validate_files<P, R>(
     files: &[P],
     file_type: &FileType,
-) -> Result<()> {
-    let scripts = remap_filepaths(files, file_type)?;
+    storage_dir: R,
+) -> Result<()>
+where
+    P: AsRef<Path>,
+    R: AsRef<Path>,
+{
+    let scripts = remap_filepaths(files, file_type, storage_dir)?;
 
     check_files_exist(&scripts)
         .map_err(|e| Error::from((format!("Missing {} file", file_type), e)))
@@ -942,33 +957,52 @@ fn map_exporters(config: &Config, exporters: &[String]) -> Vec<Exporter> {
         .collect()
 }
 
-fn remap_execute<P: AsRef<Path>>(
+fn remap_execute<P, R>(
     config: &Config,
     execute: P,
     hosts: &[String],
-) -> Result<RemoteExecution> {
+    storage_dir: R,
+) -> Result<RemoteExecution>
+where
+    P: AsRef<Path>,
+    R: AsRef<Path>,
+{
     let hosts = map_hosts(config, hosts);
 
     // This is always one script for the execute key
-    let scripts = vec![remap_filepath(execute, &FileType::Execute)?];
+    let scripts =
+        vec![remap_filepath(execute, &FileType::Execute, storage_dir)?];
 
     Ok(RemoteExecution::new(hosts, scripts, FileType::Execute))
 }
 
-fn remap_dependencies<P: AsRef<Path>>(
+fn remap_dependencies<P, R>(
     dependencies: &[P],
-) -> Result<Vec<PathBuf>> {
-    dependencies.iter().map(remap_dependency).collect()
+    storage_dir: R,
+) -> Result<Vec<PathBuf>>
+where
+    P: AsRef<Path>,
+    R: AsRef<Path>,
+{
+    dependencies
+        .iter()
+        .map(|dep| remap_dependency(dep, &storage_dir))
+        .collect()
 }
 
-fn remap_dependency<P: AsRef<Path>>(dependency: P) -> Result<PathBuf> {
-    remap_filepath(dependency, &FileType::Dependency)
+fn remap_dependency<P, R>(dependency: P, storage_dir: R) -> Result<PathBuf>
+where
+    P: AsRef<Path>,
+    R: AsRef<Path>,
+{
+    remap_filepath(dependency, &FileType::Dependency, storage_dir)
 }
 
-fn map_remote_executions(
+fn map_remote_executions<P: AsRef<Path>>(
     config: &Config,
     remote_executions: &[RemoteExecutionConfig],
     remote_execution_type: FileType,
+    storage_dir: P,
 ) -> Result<Vec<RemoteExecution>> {
     let mut mapped_remote_executions =
         Vec::with_capacity(remote_executions.len());
@@ -976,8 +1010,11 @@ fn map_remote_executions(
     for remote_execution in remote_executions.iter() {
         let hosts = map_hosts(config, &remote_execution.hosts);
 
-        let mapped_scripts =
-            remap_filepaths(&remote_execution.scripts, &remote_execution_type)?;
+        let mapped_scripts = remap_filepaths(
+            &remote_execution.scripts,
+            &remote_execution_type,
+            &storage_dir,
+        )?;
 
         mapped_remote_executions.push(RemoteExecution::new(
             hosts,
@@ -988,25 +1025,42 @@ fn map_remote_executions(
     Ok(mapped_remote_executions)
 }
 
-fn remap_filepaths<P: AsRef<Path>>(
+// TODO(joren): We can't actually remap filepaths until we know what directory the user wants to use for
+// storage. We currently have it set up so that we assume the default path is being used when we
+// validate files. We should really add a configurable storage root for checking/remapping file
+// paths.
+fn remap_filepaths<P, R>(
     files: &[P],
     file_type: &FileType,
-) -> Result<Vec<PathBuf>> {
+    storage_dir: R,
+) -> Result<Vec<PathBuf>>
+where
+    P: AsRef<Path>,
+    R: AsRef<Path>,
+{
     files
         .iter()
-        .map(|script| remap_filepath(script, file_type))
+        .map(|script| remap_filepath(script, file_type, &storage_dir))
         .collect::<Result<Vec<PathBuf>>>()
 }
 
-fn remap_filepath<P: AsRef<Path>>(
+fn remap_filepath<P, R>(
     file: P,
     file_type: &FileType,
-) -> Result<PathBuf> {
+    storage_dir: R,
+) -> Result<PathBuf>
+where
+    P: AsRef<Path>,
+    R: AsRef<Path>,
+{
     let basename = file.as_ref().file_name().unwrap_or_else(|| {
         panic!("The script {:?} should have had a filename", file.as_ref())
     });
-    let new_path =
-        PathBuf::from(format!("{STORAGE_DIR}/{file_type}")).join(basename);
+    let new_path = storage_dir
+        .as_ref()
+        .to_path_buf()
+        .join(file_type.to_string())
+        .join(basename);
     Ok(std::path::absolute(new_path)?)
 }
 
@@ -1022,9 +1076,10 @@ pub type ExperimentRuns = (u16, Vec<Experiment>);
 /// experiment config can be turned into an experiment as well.
 ///
 /// NOTE: This function should only be run AFTER config/experiment config validation has been done.
-pub fn generate_experiments(
+pub fn generate_experiments<P: AsRef<Path>>(
     config: &Config,
     experiment_config: &ExperimentConfig,
+    storage_dir: P,
 ) -> Result<ExperimentRuns> {
     let name = &experiment_config.name;
     let description = &experiment_config.description;
@@ -1066,17 +1121,23 @@ pub fn generate_experiments(
             name,
             description: description.clone(),
             kind: kind.clone(),
-            setup: map_remote_executions(config, setup, FileType::Setup)?,
+            setup: map_remote_executions(
+                config,
+                setup,
+                FileType::Setup,
+                &storage_dir,
+            )?,
             teardown: map_remote_executions(
                 config,
                 teardown,
                 FileType::Teardown,
+                &storage_dir,
             )?,
             // TODO(joren): These hosts may no longer be needed,
             // they are included in the struct where needed
             hosts: map_hosts(config, hosts),
-            execute: remap_execute(config, execute, hosts)?,
-            dependencies: remap_dependencies(dependencies)?,
+            execute: remap_execute(config, execute, hosts, &storage_dir)?,
+            dependencies: remap_dependencies(dependencies, &storage_dir)?,
             expected_arguments,
             arguments: arguments.clone(),
             exporters: map_exporters(config, exporters),
