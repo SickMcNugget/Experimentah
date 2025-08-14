@@ -58,46 +58,68 @@ pub struct ShellCommand {
 }
 
 impl ShellCommand {
+    const INTERPRETERS: [&str; 2] = ["sh", "bash"];
+    /// A helper function to ensure that none of the arguments contain spaces.
+    // Maybe this is stupid, but so far I haven't needed spaces anywhere in commands.
+    fn check_command<S: AsRef<str>>(command_args: &[S]) -> Vec<String> {
+        let mut new = Vec::with_capacity(command_args.len());
+        for part in command_args.iter() {
+            let new_part = part.as_ref().trim();
+            assert!(!new_part.contains(char::is_whitespace));
+            new.push(new_part.to_string());
+        }
+
+        new
+    }
+
     // Constructs a new ShellCommand builder with a command
     pub fn from_command<S: AsRef<str>>(command: S) -> Self {
+        let command = Self::check_command(&[command]).pop().unwrap();
+
         Self {
             interpreter: INTERPRETER,
-            command: command.as_ref().to_string(),
+            command,
             ..Default::default()
         }
     }
 
     pub fn from_command_args<S: AsRef<str>>(command_args: &[S]) -> Self {
-        assert!(command_args.len() >= 2);
-        let (command, args) = command_args.split_first().unwrap();
+        assert!(command_args.len() >= 1);
+        let mut command_args = Self::check_command(command_args);
+        let command = command_args.remove(0);
+
         Self {
             interpreter: INTERPRETER,
-            command: command.as_ref().to_string(),
-            args: args.iter().map(|arg| arg.as_ref().to_string()).collect(),
+            command,
+            args: command_args,
             ..Default::default()
         }
     }
 
     pub fn command<S: AsRef<str>>(mut self, command: S) -> Self {
-        self.command = command.as_ref().to_string();
+        let command = Self::check_command(&[command]).pop().unwrap();
+        self.command = command;
         self
     }
 
     pub fn args<S: AsRef<str>>(mut self, args: &[S]) -> Self {
-        self.args = args.iter().map(|arg| arg.as_ref().to_string()).collect();
+        let args = Self::check_command(args);
+        self.args = args;
         self
     }
 
     pub fn command_args<S: AsRef<str>>(mut self, command_args: &[S]) -> Self {
         assert!(command_args.len() >= 1);
-        let (command, args) = command_args.split_first().unwrap();
-        self.command = command.as_ref().to_string();
-        self.args = args.iter().map(|arg| arg.as_ref().to_string()).collect();
+        let mut command_args = Self::check_command(command_args);
+        let command = command_args.remove(0);
+        self.command = command;
+        self.args = command_args;
         self
     }
 
     pub fn interpreter(mut self, interpreter: &'static str) -> Self {
-        assert!(interpreter == "sh" || interpreter == "bash");
+        assert!(Self::INTERPRETERS.contains(&interpreter));
+
         self.interpreter = interpreter;
         self
     }
@@ -1036,9 +1058,19 @@ pub async fn run_script_at<P: AsRef<Path>, R: AsRef<Path>>(
 //     true
 // }
 
-// #[cfg(test)]
-// mod tests {
-// use super::*;
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// We use a ShellCommand struct to create all the shell commands that we require. It's
+    /// important that the commands created by this struct work as intended.
+
+    #[test]
+    #[should_panic]
+    fn command_with_spaces() {
+        ShellCommand::from_command("echo hi");
+    }
+}
 
 // Implicitly tested in the run_* tests
 // #[tokio::test]
