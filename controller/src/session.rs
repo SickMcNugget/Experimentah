@@ -1,29 +1,42 @@
 //! Functionality for SSH operations, such as running commands, creating background processes,
 //! making directories, downloading files, etc. is provided in this module.
 
-use openssh::{Child, KnownHosts, Stdio};
+use openssh::{Child, KnownHosts};
 use std::collections::HashMap;
-use std::future::Future;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::string::FromUtf8Error;
 use std::sync::Arc;
 use std::{fmt, io};
 use tokio::task::{self};
 
-use crate::INTERPRETER;
+// TODO(joren): This will likely disappear later
+use crate::command::{self, ExecutionType, ShellCommand};
 
-pub type BackgroundProcess = Child<Arc<openssh::Session>>;
-pub type BackgroundProcesses = Vec<BackgroundProcess>;
-pub type Session = Arc<SessionWrapper>;
+// pub type BackgroundProcess = Child<Arc<openssh::Session>>;
+// pub type BackgroundProcesses = Vec<BackgroundProcess>;
+pub type OpenSSHChild = Child<Arc<openssh::Session>>;
 pub type Sessions = HashMap<String, Session>;
+
+/// A session can represent a remote host or a local connection
+#[derive(Debug, Clone)]
+pub enum Session {
+    Local,
+    Remote(Arc<openssh::Session>),
+}
+
+// pub struct SshSession {
+//     pub session: Arc<openssh::Session>,
+// }
+
+pub struct LocalSession {}
 
 /// A specialised [`Result`] type for SSH problems that happen during many stages of the Experiment
 /// lifecycle.
 ///
-/// This type is broadly used across [`crate::ssh`] for any operation which may produce an
+/// This type is broadly used across [`crate::session`] for any operation which may produce an
 /// error.
 ///
-/// This typedef is generally used to avoid writing out [`crate::ssh::Error`] directly and is
+/// This typedef is generally used to avoid writing out [`crate::session::Error`] directly and is
 /// otherwise a direct mapping to [`Result`].
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -34,231 +47,40 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// struct with only a session inside of it, we may have more fields required here in the future.
 #[derive(Debug)]
 pub struct SessionWrapper {
-    session: Arc<openssh::Session>,
+    pub session: Arc<openssh::Session>,
 }
 
-impl SessionWrapper {
-    fn new(session: openssh::Session) -> Self {
-        Self {
-            session: Arc::new(session),
-        }
-    }
-}
+// impl SessionWrapper {
+//     fn new(session: openssh::Session) -> Self {
+//         Self {
+//             session: Arc::new(session),
+//         }
+//     }
+// }
 
-/// A [`ShellCommand`] is a helper for constructing common commands that we use throughout Experimentah.
-/// It is essentially a builder for Vec<String> outputs that we can use in multiple SSH functions.
-#[derive(Debug, Default, Clone)]
-pub struct ShellCommand {
-    interpreter: &'static str,
-    command: String,
-    args: Vec<String>,
-    working_directory: Option<PathBuf>,
-    stdout_file: Option<PathBuf>,
-    stderr_file: Option<PathBuf>,
-    /// Captures the PID of the running process into a file for future reference
-    pid_file: Option<PathBuf>,
-    /// Uses the 'flock' command available on most Linux distributions to prevent running
-    /// commands until a file lock is no longer held.
-    advisory_lock_file: Option<PathBuf>,
-}
+/// Runs a ShellCommand in parallel on all SSH sessions provided.
+// pub async fn run_shell_command(
+//     sessions: &Sessions,
+//     shell_command: &ShellCommand,
+// ) -> Result<()> {
+//     // TODO(joren): Do something with the return Output type
+//     common_async(sessions, remote_shell_command, shell_command.clone()).await?;
+//     Ok(())
+// }
 
-impl ShellCommand {
-    const INTERPRETERS: [&str; 2] = ["sh", "bash"];
-    /// A helper function to ensure that none of the arguments contain spaces.
-    // Maybe this is stupid, but so far I haven't needed spaces anywhere in commands.
-    fn format_shell_command<S: AsRef<str>>(shell_command: &[S]) -> Vec<String> {
-        let mut new = Vec::with_capacity(shell_command.len());
-        for part in shell_command.iter() {
-            let new_part = part.as_ref().trim();
-            new.push(new_part.to_string());
-        }
-
-        new
-    }
-
-    // Constructs a new ShellCommand builder with a command
-    pub fn from_command<S: AsRef<str>>(command: S) -> Self {
-        let command = Self::format_shell_command(&[command]).pop().unwrap();
-
-        Self {
-            interpreter: INTERPRETER,
-            command,
-            ..Default::default()
-        }
-    }
-
-    pub fn from_command_args<S: AsRef<str>>(command_args: &[S]) -> Self {
-        assert!(!command_args.is_empty());
-        let mut command_args = Self::format_shell_command(command_args);
-        let command = command_args.remove(0);
-
-        Self {
-            interpreter: INTERPRETER,
-            command,
-            args: command_args,
-            ..Default::default()
-        }
-    }
-
-    pub fn command<S: AsRef<str>>(&mut self, command: S) -> &mut Self {
-        let command = Self::format_shell_command(&[command]).pop().unwrap();
-
-        self.command = command;
-        self
-    }
-
-    pub fn args<S: AsRef<str>>(&mut self, args: &[S]) -> &mut Self {
-        let args = Self::format_shell_command(args);
-        self.args = args;
-        self
-    }
-
-    pub fn command_args<S: AsRef<str>>(
-        &mut self,
-        command_args: &[S],
-    ) -> &mut Self {
-        assert!(!command_args.is_empty());
-        let mut command_args = Self::format_shell_command(command_args);
-        let command = command_args.remove(0);
-
-        self.command = command;
-        self.args = command_args;
-        self
-    }
-
-    pub fn interpreter(&mut self, interpreter: &'static str) -> &mut Self {
-        self.interpreter = interpreter;
-        self
-    }
-
-    pub fn working_directory<P: AsRef<Path>>(
-        &mut self,
-        working_directory: P,
-    ) -> &mut Self {
-        self.working_directory = Some(working_directory.as_ref().into());
-        self
-    }
-
-    pub fn stdout_file<P: AsRef<Path>>(&mut self, stdout_file: P) -> &mut Self {
-        self.stdout_file = Some(stdout_file.as_ref().into());
-        self
-    }
-
-    pub fn stderr_file<P: AsRef<Path>>(&mut self, stderr_file: P) -> &mut Self {
-        self.stderr_file = Some(stderr_file.as_ref().into());
-        self
-    }
-
-    pub fn pid_file<P: AsRef<Path>>(&mut self, pid_file: P) -> &mut Self {
-        self.pid_file = Some(pid_file.as_ref().into());
-        self
-    }
-
-    pub fn advisory_lock_file<P: AsRef<Path>>(
-        &mut self,
-        advisory_lock_file: P,
-    ) -> &mut Self {
-        self.advisory_lock_file = Some(advisory_lock_file.as_ref().into());
-        self
-    }
-
-    // pub fn
-
-    pub fn build(&self) -> Result<Vec<String>> {
-        if self.command.contains(char::is_whitespace) {
-            return Err(Error::ShellError(format!(
-                "Command '{}' contains whitespace",
-                &self.command
-            )));
-        }
-
-        if !Self::INTERPRETERS.contains(&self.interpreter) {
-            return Err(Error::ShellError(format!(
-                "Interpreter '{}' is not allowed. Expected one of {:?}",
-                &self.interpreter,
-                Self::INTERPRETERS
-            )));
-        }
-
-        let mut shell_command = vec![];
-        shell_command.push(self.interpreter.to_string());
-        shell_command.push("-c".into());
-
-        let mut args: Vec<String> = vec![];
-
-        if let Some(working_directory) = &self.working_directory {
-            args.push("cd".into());
-            args.push(working_directory.to_string_lossy().into());
-            args.push("&&".into());
-        }
-
-        // We capture our shell's PID and then replace the shell with our process.
-        if let Some(pid_file) = &self.pid_file {
-            args.push("echo".into());
-            args.push("$$".into());
-            args.push(format!(">{};", pid_file.to_string_lossy()));
-            args.push("exec".into());
-        }
-
-        if let Some(advisory_lock_file) = &self.advisory_lock_file {
-            args.push("flock".into());
-            args.push(advisory_lock_file.to_string_lossy().to_string());
-        }
-
-        args.push(self.command.clone());
-        for arg in self.args.iter() {
-            args.push(format!("\"{arg}\""));
-        }
-
-        if let Some(stdout_file) = &self.stdout_file {
-            args.push(format!(">{}", stdout_file.to_string_lossy()));
-        }
-
-        if let Some(stderr_file) = &self.stderr_file {
-            args.push(format!("2>{}", stderr_file.to_string_lossy()));
-        }
-
-        shell_command.push(args.join(" "));
-
-        Ok(shell_command)
-    }
-
-    // pub fn build_tokio_command(&self) {}
-
-    pub fn build_remote_arc_command(
-        &self,
-        session: &Session,
-    ) -> Result<openssh::OwningCommand<Arc<openssh::Session>>> {
-        let comm_args = self.build()?;
-        let (comm, args) = comm_args.split_at(1);
-        let comm = comm.first().unwrap();
-        let mut owned_comm = session.session.clone().arc_command(comm);
-        owned_comm
-            .args(args)
-            .stdin(Stdio::inherit())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        Ok(owned_comm)
-    }
-
-    pub fn build_remote_command<'a>(
-        &self,
-        session: &'a Session,
-    ) -> Result<openssh::OwningCommand<&'a openssh::Session>> {
-        let comm_args = self.build()?;
-        let (comm, args) = comm_args.split_at(1);
-        let comm = comm.first().unwrap();
-        let mut owned_comm = session.session.command(comm);
-        owned_comm
-            .args(args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        Ok(owned_comm)
-    }
-}
+/// Runs a ShellCommand in parallel in the background on all SSH sessions provided,
+/// returning a handle to each of the background processes.
+// pub async fn run_background_shell_command(
+//     sessions: &Sessions,
+//     shell_command: &ShellCommand,
+// ) -> Result<BackgroundProcesses> {
+//     common_async(
+//         sessions,
+//         remote_background_shell_command,
+//         shell_command.clone(),
+//     )
+//     .await
+// }
 
 // impl<'a> Default for ShellCommand<'a> {
 //     fn default() -> Self {
@@ -292,7 +114,7 @@ pub enum Error {
     IOError(String, io::Error),
     StateError(String),
     ProcessError(String, String, Option<i32>),
-    ShellError(String),
+    CommandError(String, command::Error),
 }
 
 impl Error {
@@ -366,8 +188,8 @@ impl fmt::Display for Error {
             Self::ProcessError(ref message, ref stderr, code) => {
                 Self::display_process_error(f, message, stderr, code)?;
             }
-            Self::ShellError(ref message) => {
-                write!(f, "{message}")?;
+            Self::CommandError(ref message, ref source) => {
+                write!(f, "{message}: {source}")?;
             }
         }
 
@@ -382,6 +204,7 @@ impl std::error::Error for Error {
             Self::OutputError(.., ref source) => Some(source),
             Self::IOError(.., ref source) => Some(source),
             Self::JoinError(.., ref source) => Some(source),
+            Self::CommandError(.., ref source) => Some(source),
             _ => None,
         }
     }
@@ -423,9 +246,15 @@ impl From<(String, String, Option<i32>)> for Error {
     }
 }
 
-impl From<shlex::QuoteError> for Error {
-    fn from(value: shlex::QuoteError) -> Self {
-        Self::ShellError(format!("Failed to quote argument: {value}"))
+// impl From<shlex::QuoteError> for Error {
+//     fn from(value: shlex::QuoteError) -> Self {
+//         Self::ShellError(format!("Failed to quote argument: {value}"))
+//     }
+// }
+
+impl From<command::Error> for Error {
+    fn from(value: command::Error) -> Self {
+        Self::CommandError("Command error".to_string(), value)
     }
 }
 
@@ -441,25 +270,26 @@ pub async fn connect_to_hosts<S: AsRef<str>>(hosts: &[S]) -> Result<Sessions> {
 
     let mut sessions: Sessions = HashMap::new();
     for host in hosts.iter() {
-        let session =
-            openssh::Session::connect(host, KnownHosts::Strict).await?;
-        sessions.insert(
-            host.as_ref().to_string(),
-            Arc::new(SessionWrapper::new(session)),
-        );
+        let session = match host.as_ref() {
+            crate::LOCALHOST => Session::Local,
+            _ => Session::Remote(Arc::new(
+                openssh::Session::connect(host, KnownHosts::Strict).await?,
+            )),
+        };
+        sessions.insert(host.as_ref().to_string(), session);
     }
 
     Ok(sessions)
 }
 
 /// Uploads a single file/directory to the destination directory for each of the sessions provided.
-pub async fn upload_one<P: AsRef<Path>>(
-    sessions: &Sessions,
-    source_path: P,
-    destination_path: P,
-) -> Result<()> {
-    upload(sessions, &[source_path], destination_path).await
-}
+// pub async fn upload_one<P: AsRef<Path>>(
+//     sessions: &Sessions,
+//     source_path: P,
+//     destination_path: P,
+// ) -> Result<()> {
+//     upload(sessions, &[source_path], destination_path).await
+// }
 
 /// Uploads a list of files/directories to the destination directory for each of the sessions
 /// provided.
@@ -483,137 +313,153 @@ pub async fn upload<P: AsRef<Path>>(
         }
     }
 
-    let mut command = vec!["scp".to_string()];
+    let mut command_args = vec!["scp".to_string()];
     if has_dir {
-        command.push("-r".to_string());
+        command_args.push("-r".to_string());
     }
 
     for source_path in source_paths {
-        command.push(source_path.as_ref().to_string_lossy().to_string());
+        command_args.push(source_path.as_ref().to_string_lossy().to_string());
     }
 
-    let params = (command, destination_path.as_ref().to_path_buf());
+    for (host, _) in sessions.iter() {
+        let command_args_w_host: Vec<String> = command_args
+            .iter()
+            .cloned()
+            .chain([format!(
+                "{host}:{}",
+                destination_path.as_ref().to_string_lossy()
+            )])
+            .collect();
 
-    // TODO(joren): it might be worth *not* ignoring the output return
-    // We could even write this to file as needed.
-    // IMPORTANT NOTE: I think that we're currently streaming all this output
-    // over the network. Might not be such a great idea.
-    common_async(sessions, do_scp, params).await?;
+        let shell_command =
+            ShellCommand::from_command_args(&command_args_w_host);
+
+        command::run_local_command(shell_command, ExecutionType::Status)
+            .await?;
+    }
 
     Ok(())
 }
 
-async fn do_scp(
-    host: String,
-    _: Session,
-    params: (Vec<String>, PathBuf),
-) -> Result<std::process::Output> {
-    let (mut command, destination_path) = params;
-    command.push(format!("{host}:{}", destination_path.to_string_lossy()));
-
-    let output = tokio::process::Command::new(command.first().unwrap())
-        .args(&command[1..])
-        .output()
-        .await
-        .map_err(Error::from)?;
-
-    if !output.status.success() {
-        let status_code = output.status.code();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        let msg = format!("Failed to scp upload to host {host}");
-        Err((msg, stderr, status_code))?;
-    }
-
-    Ok(output)
-}
-
+// async fn do_scp(
+//     host: String,
+//     _: Session,
+//     params: (Vec<String>, PathBuf),
+// ) -> Result<std::process::Output> {
+//     let (mut command, destination_path) = params;
+//     command.push(format!("{host}:{}", destination_path.to_string_lossy()));
+//
+//     let output = tokio::process::Command::new(command.first().unwrap())
+//         .args(&command[1..])
+//         .output()
+//         .await
+//         .map_err(Error::from)?;
+//
+//     if !output.status.success() {
+//         let status_code = output.status.code();
+//         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+//         let msg = format!("Failed to scp upload to host {host}");
+//         Err((msg, stderr, status_code))?;
+//     }
+//
+//     Ok(output)
+// }
+//
 /// Used to download a directory from each remote host into a local experiment results directory.
 pub async fn download<P: AsRef<Path>>(
     sessions: &Sessions,
     remote_paths: &[P],
     local_destination: P,
 ) -> Result<()> {
-    let remote_args: Vec<String> = remote_paths
-        .iter()
-        .map(|p| p.as_ref().to_string_lossy().to_string())
-        .collect();
-    let params = (remote_args, local_destination.as_ref().to_path_buf());
-    common_async(sessions, do_scp_download, params).await?;
+    let command_args = ["scp".into(), "-r".into()];
+
+    for (host, _) in sessions.iter() {
+        let mut command_args = command_args.to_vec();
+        let local_destination_dir = local_destination.as_ref().join(host);
+        std::fs::create_dir_all(&local_destination_dir).map_err(Error::from)?;
+
+        for rp in remote_paths.iter() {
+            command_args
+                .push(format!("{host}:{}/*", rp.as_ref().to_string_lossy()));
+        }
+        command_args.push(local_destination_dir.to_string_lossy().to_string());
+
+        let shell_command = ShellCommand::from_command_args(&command_args);
+        command::run_local_command(shell_command, ExecutionType::Status)
+            .await?;
+    }
+
     Ok(())
 }
 
 // TODO(jackson): maybe just make the do_scp function work for upload and download?
-async fn do_scp_download(
-    host: String,
-    _: Session,
-    params: (Vec<String>, PathBuf),
-) -> Result<std::process::Output> {
-    let (remote_paths, local_destination) = params;
-
-    // Ensure the local destination directory exists for this host
-    let local_destination_dir = local_destination.join(&host);
-    std::fs::create_dir_all(&local_destination_dir).map_err(Error::from)?;
-
-    let mut command: Vec<String> = vec!["scp".into(), "-r".into()];
-    for rp in remote_paths.iter() {
-        // Add /* to copy contents of directory, not the directory itself
-        command.push(format!("{host}:{}/*", rp));
-    }
-    command.push(local_destination_dir.to_string_lossy().to_string());
-
-    let output = tokio::process::Command::new(command.first().unwrap())
-        .args(&command[1..])
-        .output()
-        .await
-        .map_err(Error::from)?;
-
-    if !output.status.success() {
-        let status_code = output.status.code();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        let msg = format!(
-            "Failed to scp download from host {host} -> {}",
-            local_destination_dir.to_string_lossy()
-        );
-        Err((msg, stderr, status_code))?;
-    }
-
-    Ok(output)
-}
+// async fn do_scp_download(
+//     host: String,
+//     _: Session,
+//     params: (Vec<String>, PathBuf),
+// ) -> Result<std::process::Output> {
+//     let (remote_paths, local_destination) = params;
+//
+//     // Ensure the local destination directory exists for this host
+//     let local_destination_dir = local_destination.join(&host);
+//     std::fs::create_dir_all(&local_destination_dir).map_err(Error::from)?;
+//
+//     let mut command: Vec<String> = vec!["scp".into(), "-r".into()];
+//     for rp in remote_paths.iter() {
+//         // Add /* to copy contents of directory, not the directory itself
+//         command.push(format!("{host}:{}/*", rp));
+//     }
+//     command.push(local_destination_dir.to_string_lossy().to_string());
+//
+//     let output = tokio::process::Command::new(command.first().unwrap())
+//         .args(&command[1..])
+//         .output()
+//         .await
+//         .map_err(Error::from)?;
+//
+//     if !output.status.success() {
+//         let status_code = output.status.code();
+//         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+//         let msg = format!(
+//             "Failed to scp download from host {host} -> {}",
+//             local_destination_dir.to_string_lossy()
+//         );
+//         Err((msg, stderr, status_code))?;
+//     }
+//
+//     Ok(output)
+// }
 
 // TODO(joren): Change result so that it links to the started process
 /// Runs a command in parallel in the background on all SSH sessions provided, returning a handle
 /// to each of the processes run in this way.
-pub async fn run_background_command<S: AsRef<str>>(
-    sessions: &Sessions,
-    command_args: &[S],
-) -> Result<BackgroundProcesses> {
-    command_check(command_args)?;
-
-    let params: Vec<String> = command_args
-        .iter()
-        .map(|part| part.as_ref().to_string())
-        .collect();
-
-    common_async(sessions, remote_background_command, params).await
-}
+// pub async fn run_background_command<S: AsRef<str>>(
+//     sessions: &Sessions,
+//     command_args: &[S],
+// ) -> Result<BackgroundProcesses> {
+//     command_check(command_args)?;
+//
+//     let shell_command = ShellCommand::from_command_args(command_args);
+//     common_async(sessions, remote_background_shell_command, shell_command).await
+// }
 
 /// Runs a command in parallel in the background on all SSH sessions provided, with the current
 /// working directory set to a given path, returning a handle to each of the processes run in this
 /// way.
-pub async fn run_background_command_at<S: AsRef<str>, P: AsRef<Path>>(
-    sessions: &Sessions,
-    command_args: &[S],
-    directory: P,
-) -> Result<BackgroundProcesses> {
-    let cd_command = cd_command(directory);
-    let params: Vec<String> = cd_command
-        .into_iter()
-        .chain(command_args.iter().map(|part| part.as_ref().to_string()))
-        .collect();
+// pub async fn run_background_command_at<S: AsRef<str>, P: AsRef<Path>>(
+//     sessions: &Sessions,
+//     command_args: &[S],
+//     directory: P,
+// ) -> Result<BackgroundProcesses> {
+//     let mut shell_command = ShellCommand::from_command_args(command_args);
+//     shell_command.working_directory(directory);
+//     common_async(sessions, remote_background_shell_command, shell_command).await
+// }
 
-    common_async(sessions, remote_background_command, params).await
-}
-
+// Previously used to emulate working directories before `ShellCommand` supported `working_directory`.
+// Kept for clarity; replace call sites with `ShellCommand::working_directory`.
+#[allow(dead_code)]
 fn cd_command<P: AsRef<Path>>(path: P) -> [String; 3] {
     [
         "cd".into(),
@@ -623,100 +469,79 @@ fn cd_command<P: AsRef<Path>>(path: P) -> [String; 3] {
 }
 
 /// Runs a command in parallel on all SSH sessions provided.
-pub async fn run_command<S: AsRef<str>>(
-    sessions: &Sessions,
-    command_args: &[S],
-) -> Result<()> {
-    command_check(command_args)?;
-
-    let params: Vec<String> = command_args
-        .iter()
-        .map(|part| part.as_ref().to_string())
-        .collect();
-    // TODO(joren): Do something with the return Output type
-    common_async(sessions, remote_command, params).await?;
-
-    Ok(())
-}
 
 /// Runs a command in parallel on all SSH sessions provided, with the current working directory
 /// set to a given path.
-pub async fn run_command_at<S: AsRef<str>, P: AsRef<Path>>(
-    sessions: &Sessions,
-    command_args: &[S],
-    directory: P,
-) -> Result<()> {
-    let cd_command = cd_command(directory);
-    let params: Vec<String> = cd_command
-        .into_iter()
-        .chain(command_args.iter().map(|part| part.as_ref().to_string()))
-        .collect();
-    run_command(sessions, &params).await
-}
+// pub async fn run_command_at<S: AsRef<str>, P: AsRef<Path>>(
+//     sessions: &Sessions,
+//     command_args: &[S],
+//     directory: P,
+// ) -> Result<()> {
+//     let mut shell_command = ShellCommand::from_command_args(command_args);
+//     shell_command.working_directory(directory);
+//     common_async(sessions, remote_shell_command, shell_command).await?;
+//     Ok(())
+// }
 
-fn command_check<S: AsRef<str>>(command: &[S]) -> Result<()> {
-    if command.is_empty() {
-        Err(Error::StateError(
-            "No command was supplied when trying to run a command remotely"
-                .to_string(),
-        ))?;
-    }
-    Ok(())
-}
+// fn command_check<S: AsRef<str>>(command: &[S]) -> Result<()> {
+//     if command.is_empty() {
+//         Err(Error::StateError(
+//             "No command was supplied when trying to run a command remotely"
+//                 .to_string(),
+//         ))?;
+//     }
+//     Ok(())
+// }
 
-async fn remote_command(
-    host: String,
-    session: Session,
-    command_args: Vec<String>,
-) -> Result<()> {
-    let command_c = command_args.first().unwrap();
-    let command_args_c = command_args.join(" ");
+// async fn remote_shell_command(
+//     host: String,
+//     session: Session,
+//     shell_command: ShellCommand,
+// ) -> Result<()> {
+//     let err_str = format!(
+//         "Failed to run program '{}' on host {host}",
+//         shell_command.command
+//     );
+//
+//     let mut owned_command = shell_command.build_remote_command(&session)?;
+//     match owned_command.output().await {
+//         Ok(output) => {
+//             if !output.status.success() {
+//                 let stderr = String::from_utf8(output.stderr).map_err(|e| {
+//                     Error::OutputError(
+//                         format!(
+//                             "Failed to convert stderr bytes to UTF-8 for program '{}' on host '{host}'",
+//                             shell_command.command
+//                         ),
+//                         e,
+//                     )
+//                 })?;
+//                 Err((err_str, stderr, output.status.code()))?;
+//             }
+//         }
+//         Err(e) => {
+//             Err((err_str, e))?;
+//         }
+//     }
+//     Ok(())
+// }
 
-    let mut owned_command = session.session.command(INTERPRETER);
-    owned_command.args(["-c", &command_args_c]);
-
-    let err_str = format!("Failed to run program '{command_c}' on host {host}");
-
-    match owned_command.output().await {
-        Ok(output) => {
-            if !output.status.success() {
-                let stderr = String::from_utf8(output.stderr).map_err(|e| {
-                    Error::OutputError(format!("Failed to convert stderr bytes to UTF-8 for program '{command_c}' on host '{host}'"), e)
-                })?;
-                Err((err_str, stderr, output.status.code()))?;
-            }
-
-            // TODO(joren): Add back a way to interact with output?
-            // output_closure(host, output.stdout);
-        }
-        Err(e) => {
-            Err((err_str, e))?;
-        }
-    }
-    Ok(())
-}
-
-async fn remote_background_command(
-    host: String,
-    session: Session,
-    command_args: Vec<String>,
-) -> Result<BackgroundProcess> {
-    let command_c = command_args.first().unwrap();
-    let command_args_c = command_args.join(" ");
-
-    let err_str = format!(
-        "Failed to run background program '{command_c}' on host '{host}'"
-    );
-
-    session
-        .session
-        .clone()
-        .arc_command(INTERPRETER)
-        .args(["-c", &command_args_c])
-        .spawn()
-        .await
-        .map_err(|e| Error::from((err_str, e)))
-}
+// async fn remote_background_shell_command(
+//     host: String,
+//     session: Session,
+//     shell_command: ShellCommand,
+// ) -> Result<BackgroundProcess> {
+//     let err_str = format!(
+//         "Failed to run background program '{}' on host '{host}'",
+//         shell_command.command
+//     );
+//
+//     shell_command
+//         .build_remote_arc_command(&session)?
+//         .spawn()
+//         .await
+//         .map_err(|e| Error::from((err_str, e)))
+// }
 
 /// Makes multiple directories at once in parallel across the sessions passed in.
 /// This means if 8 directories need to be made on 3 hosts,
@@ -725,9 +550,8 @@ pub async fn make_directories<P: AsRef<Path>>(
     sessions: &Sessions,
     paths: &[P],
 ) -> Result<()> {
-    let command: Vec<String> = ["mkdir", "-p"]
+    let command_args: Vec<String> = ["mkdir".to_string(), "-p".into()]
         .into_iter()
-        .map(|s| s.to_string())
         .chain(
             paths
                 .iter()
@@ -735,7 +559,12 @@ pub async fn make_directories<P: AsRef<Path>>(
         )
         .collect();
 
-    run_command(sessions, &command).await
+    let shell_command = ShellCommand::from_command_args(&command_args);
+
+    command::run_command(sessions, shell_command, ExecutionType::Status)
+        .await?;
+
+    Ok(())
 }
 
 /// Creates a directory on multiple remote hosts in parallel using the mkdir -p command.
@@ -744,9 +573,17 @@ pub async fn make_directory<P: AsRef<Path>>(
     sessions: &Sessions,
     path: P,
 ) -> Result<()> {
-    let path = path.as_ref().to_string_lossy().to_string();
-    let params = ["mkdir".into(), "-p".into(), path];
-    run_command(sessions, &params).await
+    let command_args = [
+        "mkdir".to_string(),
+        "-p".into(),
+        path.as_ref().to_string_lossy().to_string(),
+    ];
+
+    let shell_command = ShellCommand::from_command_args(&command_args);
+    command::run_command(sessions, shell_command, ExecutionType::Status)
+        .await?;
+
+    Ok(())
 }
 
 /// This function does a lot of heavy lifting when we make remote requests.
@@ -756,52 +593,55 @@ pub async fn make_directory<P: AsRef<Path>>(
 /// Generally we want to return something from our function, but it can be (), too.
 ///
 /// Some important notes about using this function.
-/// Make sure that owned types are sent in; Don't use a &[String], use a Vec<String>.
-async fn common_async<T, P, Fut>(
-    sessions: &Sessions,
-    task_fn: impl Fn(String, Arc<SessionWrapper>, P) -> Fut + Send + 'static + Copy,
-    params: P,
-) -> Result<Vec<T>>
-where
-    T: Send + 'static,
-    Fut: Future<Output = Result<T>> + Send + 'static,
-    P: Clone + Send + 'static,
-{
-    if sessions.is_empty() {
-        Err(Error::StateError(
-            "No sessions were present when trying to run a command".to_string(),
-        ))?;
-    }
-
-    // let mut tasks: Vec<JoinHandle<BoxFuture<'static, Result<T>>>> =
-    //     Vec::with_capacity(sessions.len());
-    let mut tasks = Vec::with_capacity(sessions.len());
-    for (host, session) in sessions.iter() {
-        // These two variables are always available for the async block
-        let host_c = host.clone();
-        let session_c = session.clone();
-        let params_c = params.clone();
-
-        tasks.push(task::spawn(async move {
-            Box::pin(task_fn(host_c, session_c, params_c)).await
-        }));
-    }
-
-    let mut results = vec![];
-    for task in tasks.into_iter() {
-        results.push(task.await??);
-    }
-
-    Ok(results)
-}
+/// Make sure that owned types are sent in; Don't use a String slice, use a Vector of Strings.
+// async fn common_async<T, P, Fut>(
+//     sessions: &Sessions,
+//     task_fn: impl Fn(String, Arc<SessionWrapper>, P) -> Fut + Send + 'static + Copy,
+//     params: P,
+// ) -> Result<Vec<T>>
+// where
+//     T: Send + 'static,
+//     Fut: Future<Output = Result<T>> + Send + 'static,
+//     P: Clone + Send + 'static,
+// {
+//     if sessions.is_empty() {
+//         Err(Error::StateError(
+//             "No sessions were present when trying to run a command".to_string(),
+//         ))?;
+//     }
+//
+//     // let mut tasks: Vec<JoinHandle<BoxFuture<'static, Result<T>>>> =
+//     //     Vec::with_capacity(sessions.len());
+//     let mut tasks = Vec::with_capacity(sessions.len());
+//     for (host, session) in sessions.iter() {
+//         // These two variables are always available for the async block
+//         let host_c = host.clone();
+//         let session_c = session.clone();
+//         let params_c = params.clone();
+//
+//         tasks.push(task::spawn(async move {
+//             Box::pin(task_fn(host_c, session_c, params_c)).await
+//         }));
+//     }
+//
+//     let mut results = vec![];
+//     for task in tasks.into_iter() {
+//         results.push(task.await??);
+//     }
+//
+//     Ok(results)
+// }
 
 // Note that the script in question is run remotely,
 // so it must already exist on the target sessions
 /// Executes a script in a bash shell in parallel on all the SSH sessions provided.
-pub async fn run_script(sessions: &Sessions, script: &Path) -> Result<()> {
-    let args = [script.to_string_lossy().to_string()];
-    run_command(sessions, &args).await
-}
+// pub async fn run_script(sessions: &Sessions, script: &Path) -> Result<()> {
+//     let shell_command = ShellCommand::from_command_args(&[script
+//         .to_string_lossy()
+//         .to_string()]);
+//     common_async(sessions, remote_shell_command, shell_command).await?;
+//     Ok(())
+// }
 
 /// Executes a script in a bash shell in parallel on all the SSH sessions provided, with the
 /// current working directory set to the given path.
@@ -810,8 +650,14 @@ pub async fn run_script_at<P: AsRef<Path>, R: AsRef<Path>>(
     script: P,
     directory: R,
 ) -> Result<()> {
-    let args = [script.as_ref().to_string_lossy().to_string()];
-    run_command_at(sessions, &args, directory).await
+    let mut shell_command = ShellCommand::from_command_args(&[script
+        .as_ref()
+        .to_string_lossy()
+        .to_string()]);
+    shell_command.working_directory(directory);
+    command::run_command(sessions, shell_command, ExecutionType::Output)
+        .await?;
+    Ok(())
 }
 
 // ----- DANIEL'S IMPLEMENTATION OF SSH FUNCTIONALITY. KEEP THIS AROUND FOR REFERENCE AND -----
