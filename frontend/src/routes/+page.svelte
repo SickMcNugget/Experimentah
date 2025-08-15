@@ -1,10 +1,16 @@
 <script lang="ts">
 	import Status from './Status.svelte';
 	import Tabs from './Tabs.svelte';
-	import { Button } from '$lib/components/ui/button';
 	import type { PageData } from './$types';
+	import { infrastructureConfigs, experimentConfigs } from './configs.svelte';
 
 	let { data }: { data: PageData } = $props();
+
+	infrastructureConfigs.length = 0;
+	infrastructureConfigs.push(...data.infrastructureConfigs);
+
+	experimentConfigs.length = 0;
+	experimentConfigs.push(...data.experimentConfigs);
 </script>
 
 <!-- heading -->
@@ -20,5 +26,5 @@
 
 <!-- tabs -->
 <section class="max-w-[65rem] pt-8 mx-auto">
-	<Tabs data={data}></Tabs>
+	<Tabs></Tabs>
 </section>

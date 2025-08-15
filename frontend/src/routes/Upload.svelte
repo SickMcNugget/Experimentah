@@ -5,7 +5,10 @@
 	import * as Card from '$lib/components/ui/card/index.js';
 	import { Upload } from '@lucide/svelte';
 
-	let { configType, onUpload }: { configType: 'infrastructure' | 'experiment'; onUpload?: (file: File) => void } = $props();
+	let {
+		configType,
+		onUpload
+	}: { configType: 'infrastructure' | 'experiment'; onUpload?: (file: File) => void } = $props();
 </script>
 
 <Card.Root class="w-full">

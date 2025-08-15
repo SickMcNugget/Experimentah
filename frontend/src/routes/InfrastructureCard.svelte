@@ -5,9 +5,15 @@
 	import { Button } from '$lib/components/ui/button/index.js';
 	import { Trash, Edit } from '@lucide/svelte';
 	import Editor from './Editor.svelte';
+	import { handleModify } from './configs.svelte';
 
 	// State for the main TOML content
-	let { name, modifiedDate, content, onDelete }: { name: string; modifiedDate: string; content?: string; onDelete?: () => void } = $props();
+	let {
+		name,
+		modifiedDate,
+		content,
+		onDelete
+	}: { name: string; modifiedDate: string; content?: string; onDelete?: () => void } = $props();
 
 	// State for the dialog and its editor
 	let open = $state(false);
@@ -20,7 +26,7 @@
 	};
 
 	const handleSave = () => {
-		// TODO(jackson): save the content to the server
+		handleModify(name, editorContent, 'infrastructure');
 		open = false;
 	};
 
@@ -43,7 +49,7 @@
 </Card.Root>
 
 <Dialog.Root bind:open>
-	<Dialog.Content class="h-[80vh] w-full min-w-[75rem] flex flex-col gap-4">
+	<Dialog.Content class="h-[80vh] w-full min-w-[calc(100vw-2rem)] flex flex-col gap-4">
 		<Dialog.Header>
 			<Dialog.Title>Edit {name}</Dialog.Title>
 			<Dialog.Description>
