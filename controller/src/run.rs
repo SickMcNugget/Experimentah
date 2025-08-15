@@ -584,6 +584,12 @@ impl ExperimentRunner {
                 .chain([format!(">{stdout}"), format!("2>{stderr}")])
                 .collect();
 
+            // How should we be handling commands that can either be run locally or remotely,
+            // depending on the hostname provided? It might be worth storing sessions inside of the
+            // ShellCommand struct so that we can determine whether the command needs to be run
+            // remotely or not. We could also use a trait that dispatches a ShellCommand to either
+            // a RemoteHost or a LocalHost, which would likely serve to be a more effective
+            // mechanism.
             let exporter_processes = ssh::run_background_command_at(
                 &exporter_sessions,
                 &comm,
@@ -604,17 +610,6 @@ impl ExperimentRunner {
             // We can make use of the flock command when running our exporters
             // match ssh::run_background_command(&exporter_sessions, &comm).await {
             //     Ok(child) => info!("Started exporter '{}'", exporter.name),
-            //     Err(e) => {
-            //         error!(
-            //             "Failed to start exporter '{}': {}",
-            //             exporter.name, e
-            //         )
-            //     }
-            // }
-
-            // ssh::run_command(&exporter_sessions, &comm).await?;
-            // match ssh::run_command(&exporter_sessions, &comm).await {
-            //     Ok(()) => info!("Started exporter '{}'", exporter.name),
             //     Err(e) => {
             //         error!(
             //             "Failed to start exporter '{}': {}",
