@@ -14,7 +14,7 @@ use crate::INTERPRETER;
 
 pub type BackgroundProcess = Child<Arc<openssh::Session>>;
 pub type BackgroundProcesses = Vec<BackgroundProcess>;
-pub type Session = Arc<SFTPSession>;
+pub type Session = Arc<SessionWrapper>;
 pub type Sessions = HashMap<String, Session>;
 
 /// A specialised [`Result`] type for SSH problems that happen during many stages of the Experiment
@@ -33,11 +33,11 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// transfer either files or directories at will. Whilst currently there is no point of having a
 /// struct with only a session inside of it, we may have more fields required here in the future.
 #[derive(Debug)]
-pub struct SFTPSession {
+pub struct SessionWrapper {
     session: Arc<openssh::Session>,
 }
 
-impl SFTPSession {
+impl SessionWrapper {
     fn new(session: openssh::Session) -> Self {
         Self {
             session: Arc::new(session),
@@ -47,7 +47,7 @@ impl SFTPSession {
 
 /// A [`ShellCommand`] is a helper for constructing common commands that we use throughout Experimentah.
 /// It is essentially a builder for Vec<String> outputs that we can use in multiple SSH functions.
-#[derive(Default, Clone)]
+#[derive(Debug, Default, Clone)]
 pub struct ShellCommand {
     interpreter: &'static str,
     command: String,
@@ -55,17 +55,21 @@ pub struct ShellCommand {
     working_directory: Option<PathBuf>,
     stdout_file: Option<PathBuf>,
     stderr_file: Option<PathBuf>,
+    /// Captures the PID of the running process into a file for future reference
+    pid_file: Option<PathBuf>,
+    /// Uses the 'flock' command available on most Linux distributions to prevent running
+    /// commands until a file lock is no longer held.
+    advisory_lock_file: Option<PathBuf>,
 }
 
 impl ShellCommand {
     const INTERPRETERS: [&str; 2] = ["sh", "bash"];
     /// A helper function to ensure that none of the arguments contain spaces.
     // Maybe this is stupid, but so far I haven't needed spaces anywhere in commands.
-    fn check_command<S: AsRef<str>>(command_args: &[S]) -> Vec<String> {
-        let mut new = Vec::with_capacity(command_args.len());
-        for part in command_args.iter() {
+    fn format_shell_command<S: AsRef<str>>(shell_command: &[S]) -> Vec<String> {
+        let mut new = Vec::with_capacity(shell_command.len());
+        for part in shell_command.iter() {
             let new_part = part.as_ref().trim();
-            assert!(!new_part.contains(char::is_whitespace));
             new.push(new_part.to_string());
         }
 
@@ -74,7 +78,7 @@ impl ShellCommand {
 
     // Constructs a new ShellCommand builder with a command
     pub fn from_command<S: AsRef<str>>(command: S) -> Self {
-        let command = Self::check_command(&[command]).pop().unwrap();
+        let command = Self::format_shell_command(&[command]).pop().unwrap();
 
         Self {
             interpreter: INTERPRETER,
@@ -84,8 +88,8 @@ impl ShellCommand {
     }
 
     pub fn from_command_args<S: AsRef<str>>(command_args: &[S]) -> Self {
-        assert!(command_args.len() >= 1);
-        let mut command_args = Self::check_command(command_args);
+        assert!(!command_args.is_empty());
+        let mut command_args = Self::format_shell_command(command_args);
         let command = command_args.remove(0);
 
         Self {
@@ -96,77 +100,127 @@ impl ShellCommand {
         }
     }
 
-    pub fn command<S: AsRef<str>>(mut self, command: S) -> Self {
-        let command = Self::check_command(&[command]).pop().unwrap();
+    pub fn command<S: AsRef<str>>(&mut self, command: S) -> &mut Self {
+        let command = Self::format_shell_command(&[command]).pop().unwrap();
+
         self.command = command;
         self
     }
 
-    pub fn args<S: AsRef<str>>(mut self, args: &[S]) -> Self {
-        let args = Self::check_command(args);
+    pub fn args<S: AsRef<str>>(&mut self, args: &[S]) -> &mut Self {
+        let args = Self::format_shell_command(args);
         self.args = args;
         self
     }
 
-    pub fn command_args<S: AsRef<str>>(mut self, command_args: &[S]) -> Self {
-        assert!(command_args.len() >= 1);
-        let mut command_args = Self::check_command(command_args);
+    pub fn command_args<S: AsRef<str>>(
+        &mut self,
+        command_args: &[S],
+    ) -> &mut Self {
+        assert!(!command_args.is_empty());
+        let mut command_args = Self::format_shell_command(command_args);
         let command = command_args.remove(0);
+
         self.command = command;
         self.args = command_args;
         self
     }
 
-    pub fn interpreter(mut self, interpreter: &'static str) -> Self {
-        assert!(Self::INTERPRETERS.contains(&interpreter));
-
+    pub fn interpreter(&mut self, interpreter: &'static str) -> &mut Self {
         self.interpreter = interpreter;
         self
     }
 
     pub fn working_directory<P: AsRef<Path>>(
-        mut self,
+        &mut self,
         working_directory: P,
-    ) -> Self {
+    ) -> &mut Self {
         self.working_directory = Some(working_directory.as_ref().into());
         self
     }
 
-    pub fn stdout_file<P: AsRef<Path>>(mut self, stdout_file: P) -> Self {
+    pub fn stdout_file<P: AsRef<Path>>(&mut self, stdout_file: P) -> &mut Self {
         self.stdout_file = Some(stdout_file.as_ref().into());
         self
     }
 
-    pub fn stderr_file<P: AsRef<Path>>(mut self, stderr_file: P) -> Self {
+    pub fn stderr_file<P: AsRef<Path>>(&mut self, stderr_file: P) -> &mut Self {
         self.stderr_file = Some(stderr_file.as_ref().into());
         self
     }
 
-    pub fn build(&self) -> Vec<String> {
-        let mut shell_command = vec![];
-        if let Some(working_directory) = &self.working_directory {
-            shell_command.push("cd".into());
-            shell_command.push(working_directory.to_string_lossy().into());
-            shell_command.push("&&".into());
+    pub fn pid_file<P: AsRef<Path>>(&mut self, pid_file: P) -> &mut Self {
+        self.pid_file = Some(pid_file.as_ref().into());
+        self
+    }
+
+    pub fn advisory_lock_file<P: AsRef<Path>>(
+        &mut self,
+        advisory_lock_file: P,
+    ) -> &mut Self {
+        self.advisory_lock_file = Some(advisory_lock_file.as_ref().into());
+        self
+    }
+
+    // pub fn
+
+    pub fn build(&self) -> Result<Vec<String>> {
+        if self.command.contains(char::is_whitespace) {
+            return Err(Error::ShellError(format!(
+                "Command '{}' contains whitespace",
+                &self.command
+            )));
         }
+
+        if !Self::INTERPRETERS.contains(&self.interpreter) {
+            return Err(Error::ShellError(format!(
+                "Interpreter '{}' is not allowed. Expected one of {:?}",
+                &self.interpreter,
+                Self::INTERPRETERS
+            )));
+        }
+
+        let mut shell_command = vec![];
         shell_command.push(self.interpreter.to_string());
         shell_command.push("-c".into());
-        shell_command.push(self.command.clone());
+
+        let mut args: Vec<String> = vec![];
+
+        if let Some(working_directory) = &self.working_directory {
+            args.push("cd".into());
+            args.push(working_directory.to_string_lossy().into());
+            args.push("&&".into());
+        }
+
+        // We capture our shell's PID and then replace the shell with our process.
+        if let Some(pid_file) = &self.pid_file {
+            args.push("echo".into());
+            args.push("$$".into());
+            args.push(format!(">{};", pid_file.to_string_lossy()));
+            args.push("exec".into());
+        }
+
+        if let Some(advisory_lock_file) = &self.advisory_lock_file {
+            args.push("flock".into());
+            args.push(advisory_lock_file.to_string_lossy().to_string());
+        }
+
+        args.push(self.command.clone());
         for arg in self.args.iter() {
-            shell_command.push(arg.clone());
+            args.push(format!("\"{arg}\""));
         }
 
         if let Some(stdout_file) = &self.stdout_file {
-            shell_command.push(">".into());
-            shell_command.push(stdout_file.to_string_lossy().into());
+            args.push(format!(">{}", stdout_file.to_string_lossy()));
         }
 
         if let Some(stderr_file) = &self.stderr_file {
-            shell_command.push("2>".into());
-            shell_command.push(stderr_file.to_string_lossy().into());
+            args.push(format!("2>{}", stderr_file.to_string_lossy()));
         }
 
-        shell_command
+        shell_command.push(args.join(" "));
+
+        Ok(shell_command)
     }
 
     // pub fn build_tokio_command(&self) {}
@@ -174,8 +228,8 @@ impl ShellCommand {
     pub fn build_remote_arc_command(
         &self,
         session: &Session,
-    ) -> openssh::OwningCommand<Arc<openssh::Session>> {
-        let comm_args = self.build();
+    ) -> Result<openssh::OwningCommand<Arc<openssh::Session>>> {
+        let comm_args = self.build()?;
         let (comm, args) = comm_args.split_at(1);
         let comm = comm.first().unwrap();
         let mut owned_comm = session.session.clone().arc_command(comm);
@@ -185,14 +239,14 @@ impl ShellCommand {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        owned_comm
+        Ok(owned_comm)
     }
 
     pub fn build_remote_command<'a>(
         &self,
         session: &'a Session,
-    ) -> openssh::OwningCommand<&'a openssh::Session> {
-        let comm_args = self.build();
+    ) -> Result<openssh::OwningCommand<&'a openssh::Session>> {
+        let comm_args = self.build()?;
         let (comm, args) = comm_args.split_at(1);
         let comm = comm.first().unwrap();
         let mut owned_comm = session.session.command(comm);
@@ -202,7 +256,7 @@ impl ShellCommand {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        owned_comm
+        Ok(owned_comm)
     }
 }
 
@@ -238,6 +292,7 @@ pub enum Error {
     IOError(String, io::Error),
     StateError(String),
     ProcessError(String, String, Option<i32>),
+    ShellError(String),
 }
 
 impl Error {
@@ -311,6 +366,9 @@ impl fmt::Display for Error {
             Self::ProcessError(ref message, ref stderr, code) => {
                 Self::display_process_error(f, message, stderr, code)?;
             }
+            Self::ShellError(ref message) => {
+                write!(f, "{message}")?;
+            }
         }
 
         Ok(())
@@ -365,6 +423,12 @@ impl From<(String, String, Option<i32>)> for Error {
     }
 }
 
+impl From<shlex::QuoteError> for Error {
+    fn from(value: shlex::QuoteError) -> Self {
+        Self::ShellError(format!("Failed to quote argument: {value}"))
+    }
+}
+
 /// Establishes a persistent SSH connection to the hosts passed in.
 /// Currently this function makes use only of key-based authentication, but mechanisms to take
 /// advantage of passwords and custom SSH keys will come in the future.
@@ -381,7 +445,7 @@ pub async fn connect_to_hosts<S: AsRef<str>>(hosts: &[S]) -> Result<Sessions> {
             openssh::Session::connect(host, KnownHosts::Strict).await?;
         sessions.insert(
             host.as_ref().to_string(),
-            Arc::new(SFTPSession::new(session)),
+            Arc::new(SessionWrapper::new(session)),
         );
     }
 
@@ -695,7 +759,7 @@ pub async fn make_directory<P: AsRef<Path>>(
 /// Make sure that owned types are sent in; Don't use a &[String], use a Vec<String>.
 async fn common_async<T, P, Fut>(
     sessions: &Sessions,
-    task_fn: impl Fn(String, Arc<SFTPSession>, P) -> Fut + Send + 'static + Copy,
+    task_fn: impl Fn(String, Arc<SessionWrapper>, P) -> Fut + Send + 'static + Copy,
     params: P,
 ) -> Result<Vec<T>>
 where
@@ -1066,9 +1130,164 @@ mod tests {
     /// important that the commands created by this struct work as intended.
 
     #[test]
-    #[should_panic]
-    fn command_with_spaces() {
-        ShellCommand::from_command("echo hi");
+    fn shcomm_bad_commands() {
+        assert!(ShellCommand::from_command("echo hi").build().is_err());
+        assert!(ShellCommand::from_command_args(&["ec ho", "hi"])
+            .build()
+            .is_err());
+
+        let mut shell_command = ShellCommand::from_command("echo");
+        shell_command.command("ec ho");
+        assert!(shell_command.build().is_err());
+
+        let mut shell_command = ShellCommand::from_command("echo");
+        shell_command.command_args(&["ec ho", "hi"]);
+        assert!(shell_command.build().is_err());
+
+        let mut shell_command = ShellCommand::from_command("echo");
+        shell_command.interpreter("zsh");
+        assert!(shell_command.build().is_err());
+    }
+
+    #[test]
+    fn shcomm_valid_constructions() {
+        // Command constructions
+        let mut shell_command = ShellCommand::from_command("echo");
+        assert!(shell_command.build().is_ok());
+        assert!(shell_command.command(" echo").build().is_ok());
+        assert!(shell_command.command("echo ").build().is_ok());
+        assert!(shell_command.command(" echo ").build().is_ok());
+
+        // Command_args constructions
+        let mut shell_command =
+            ShellCommand::from_command_args(&["echo", "Hello", "World!"]);
+        assert!(shell_command.build().is_ok());
+        assert!(shell_command
+            .command_args(&["echo", "Hel lo", " Worl d! "])
+            .build()
+            .is_ok());
+        assert!(shell_command
+            .command_args(&[" echo ", " Hello", "World! "])
+            .build()
+            .is_ok());
+
+        // Args constructions
+        let mut shell_command = ShellCommand::from_command("echo");
+        assert!(shell_command
+            .args(&[" He llo ", " World !"])
+            .build()
+            .is_ok());
+
+        // Interpreter constructions
+        let mut shell_command = ShellCommand::from_command("echo");
+        assert!(shell_command.interpreter("bash").build().is_ok());
+        assert!(shell_command.interpreter("sh").build().is_ok());
+
+        // Directory/File constructions
+        let mut shell_command = ShellCommand::from_command("echo");
+        assert!(shell_command
+            .working_directory(Path::new("/srv/experimentah"))
+            .build()
+            .is_ok());
+        assert!(shell_command
+            .stdout_file(Path::new("/srv/experimentah/testfile.stdout"))
+            .build()
+            .is_ok());
+        assert!(shell_command
+            .stderr_file(Path::new("/srv/experimentah/testfile.stderr"))
+            .build()
+            .is_ok());
+
+        assert!(shell_command
+            .pid_file("/srv/experimentah/testfile.pid")
+            .build()
+            .is_ok());
+
+        assert!(shell_command
+            .advisory_lock_file("/srv/experimentah/testfile.lock")
+            .build()
+            .is_ok());
+    }
+
+    #[test]
+    fn shcomm_build_returns() {
+        let mut shell_command = ShellCommand::from_command("echo");
+        compare_commands(
+            shell_command.build().unwrap(),
+            &["bash", "-c", "echo"],
+        );
+        shell_command.command("ln");
+        compare_commands(shell_command.build().unwrap(), &["bash", "-c", "ln"]);
+        shell_command.args(&["-s", "-t", "my-favorite-directory"]);
+        compare_commands(
+            shell_command.build().unwrap(),
+            &["bash", "-c", "ln \"-s\" \"-t\" \"my-favorite-directory\""],
+        );
+
+        shell_command.command_args(&["echo", "Hello", "World!"]);
+        compare_commands(
+            shell_command.build().unwrap(),
+            &["bash", "-c", "echo \"Hello\" \"World!\""],
+        );
+
+        shell_command.interpreter("sh");
+        compare_commands(
+            shell_command.build().unwrap(),
+            &["sh", "-c", "echo \"Hello\" \"World!\""],
+        );
+
+        shell_command.working_directory(Path::new("/home/myuser/mydirectory"));
+        compare_commands(
+            shell_command.build().unwrap(),
+            &[
+                "sh",
+                "-c",
+                "cd /home/myuser/mydirectory && echo \"Hello\" \"World!\"",
+            ],
+        );
+
+        shell_command.stdout_file("/home/myuser/mydirectory/echofile.stdout");
+        compare_commands(
+            shell_command.build().unwrap(),
+            &[
+                "sh", "-c", "cd /home/myuser/mydirectory && echo \"Hello\" \"World!\" >/home/myuser/mydirectory/echofile.stdout",
+            ],
+        );
+
+        shell_command.stderr_file("/home/myuser/mydirectory/echofile.stderr");
+        compare_commands(
+            shell_command.build().unwrap(),
+            &[
+                "sh", "-c", "cd /home/myuser/mydirectory && echo \"Hello\" \"World!\" >/home/myuser/mydirectory/echofile.stdout 2>/home/myuser/mydirectory/echofile.stderr",
+            ],
+        );
+
+        shell_command.pid_file("/home/myuser/mydirectory/echofile.pid");
+        compare_commands(
+            shell_command.build().unwrap(),
+            &[
+                "sh", "-c", "cd /home/myuser/mydirectory && echo $$ >/home/myuser/mydirectory/echofile.pid; exec echo \"Hello\" \"World!\" >/home/myuser/mydirectory/echofile.stdout 2>/home/myuser/mydirectory/echofile.stderr",
+            ],
+        );
+
+        shell_command
+            .advisory_lock_file("/home/myuser/mydirectory/echofile.lock");
+        compare_commands(
+            shell_command.build().unwrap(),
+            &[
+                "sh", "-c", "cd /home/myuser/mydirectory && echo $$ >/home/myuser/mydirectory/echofile.pid; exec flock /home/myuser/mydirectory/echofile.lock echo \"Hello\" \"World!\" >/home/myuser/mydirectory/echofile.stdout 2>/home/myuser/mydirectory/echofile.stderr",
+            ],
+        );
+    }
+
+    fn compare_commands(command_1: Vec<String>, command_2: &[&str]) {
+        assert_eq!(
+            command_1,
+            command_2
+                .iter()
+                .map(|part| part.to_string())
+                .collect::<Vec<String>>(),
+        );
     }
 }
 
