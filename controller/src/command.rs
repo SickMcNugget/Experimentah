@@ -199,6 +199,14 @@ impl ShellCommand {
         }
 
         let mut shell_command = vec![];
+
+        if let Some(advisory_lock_file) = &self.advisory_lock_file {
+            shell_command.push("flock".into());
+            shell_command.push("-n".into());
+            shell_command
+                .push(advisory_lock_file.to_string_lossy().to_string());
+        }
+
         shell_command.push(self.interpreter.to_string());
         shell_command.push("-c".into());
 
@@ -213,14 +221,11 @@ impl ShellCommand {
         // We capture our shell's PID and then replace the shell with our process.
         if let Some(pid_file) = &self.pid_file {
             args.push("echo".into());
+            //For some reason this always double-backslashes. We need a single backslash to get the
+            //subprocess PID out.
             args.push("$$".into());
             args.push(format!(">{};", pid_file.to_string_lossy()));
             args.push("exec".into());
-        }
-
-        if let Some(advisory_lock_file) = &self.advisory_lock_file {
-            args.push("flock".into());
-            args.push(advisory_lock_file.to_string_lossy().to_string());
         }
 
         args.push(self.command.clone());
@@ -254,7 +259,6 @@ impl ShellCommand {
             .stdin(Stdio::inherit())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-
         Ok(owned_comm)
     }
 
@@ -342,12 +346,21 @@ impl CommandExecutor for LocalCommandExecutor {
 
         let out = match *execution_type {
             ExecutionType::Output => {
+                command.stdin(std::process::Stdio::null());
+                command.stdout(std::process::Stdio::piped());
+                command.stderr(std::process::Stdio::piped());
                 ExecutionResult::Output(command.output().await?)
             }
             ExecutionType::Spawn => {
+                command.stdin(std::process::Stdio::null());
+                command.stdout(std::process::Stdio::piped());
+                command.stderr(std::process::Stdio::piped());
                 ExecutionResult::Spawn(SpawnType::Tokio(command.spawn()?))
             }
             ExecutionType::Status => {
+                command.stdin(std::process::Stdio::null());
+                command.stdout(std::process::Stdio::null());
+                command.stderr(std::process::Stdio::null());
                 ExecutionResult::Status(command.status().await?)
             }
         };
@@ -467,39 +480,56 @@ impl CommandExecutor for Arc<UnifiedExecutor> {
     }
 }
 
-pub fn create_executor(sessions: &Sessions) -> Executor {
-    let mut has_local: bool = false;
-    let mut remote_sessions: Vec<Arc<openssh::Session>> = Vec::new();
-
-    for (_host, session) in sessions.iter() {
-        match session {
-            Session::Local => {
-                has_local = true;
-            }
-            Session::Remote(ssh_session) => {
-                remote_sessions.push(ssh_session.clone());
-            }
-        }
-    }
-
-    if has_local && !remote_sessions.is_empty() {
-        let local_executor = LocalCommandExecutor::new();
-        let remote_executor = RemoteCommandExecutor::new(remote_sessions);
-        Executor::Unified(Arc::new(UnifiedExecutor::new(
-            local_executor,
-            remote_executor,
-        )))
-    } else if !remote_sessions.is_empty() {
-        Executor::Remote(Arc::new(RemoteCommandExecutor::new(remote_sessions)))
-    } else {
-        Executor::Local(Arc::new(LocalCommandExecutor::new()))
-    }
-}
-
 pub enum Executor {
     Unified(Arc<UnifiedExecutor>),
     Local(Arc<LocalCommandExecutor>),
     Remote(Arc<RemoteCommandExecutor>),
+}
+
+impl Executor {
+    pub fn from_sessions(sessions: &Sessions) -> Executor {
+        let mut has_local: bool = false;
+        let mut remote_sessions: Vec<Arc<openssh::Session>> = Vec::new();
+
+        for (_host, session) in sessions.iter() {
+            match session {
+                Session::Local => {
+                    has_local = true;
+                }
+                Session::Remote(ssh_session) => {
+                    remote_sessions.push(ssh_session.clone());
+                }
+            }
+        }
+
+        if has_local && !remote_sessions.is_empty() {
+            let local_executor = LocalCommandExecutor::new();
+            let remote_executor = RemoteCommandExecutor::new(remote_sessions);
+            Executor::Unified(Arc::new(UnifiedExecutor::new(
+                local_executor,
+                remote_executor,
+            )))
+        } else if !remote_sessions.is_empty() {
+            Executor::Remote(Arc::new(RemoteCommandExecutor::new(
+                remote_sessions,
+            )))
+        } else {
+            Executor::Local(Arc::new(LocalCommandExecutor::new()))
+        }
+    }
+
+    /// Sometimes we need to execute a command on a single session.
+    pub fn from_session(session: Arc<openssh::Session>) -> Executor {
+        Executor::Remote(Arc::new(RemoteCommandExecutor::new(vec![session])))
+        // match session {
+        //     Session::Local => Executor::Local(Arc::new(LocalCommandExecutor)),
+        //     Session::Remote(ssh_session) => {
+        //         Executor::Remote(Arc::new(RemoteCommandExecutor::new(vec![
+        //             ssh_session,
+        //         ])))
+        //     }
+        // }
+    }
 }
 
 impl CommandExecutor for Executor {
@@ -531,10 +561,22 @@ pub async fn run_command(
     shell_command: ShellCommand,
     execution_type: ExecutionType,
 ) -> Result<Vec<ExecutionResult>> {
-    let executor = create_executor(sessions);
+    let executor = Executor::from_sessions(sessions);
     executor
         .execute(shell_command.into(), execution_type.into())
         .await
+}
+
+pub async fn run_command_openssh_session(
+    session: Arc<openssh::Session>,
+    shell_command: ShellCommand,
+    execution_type: ExecutionType,
+) -> Result<ExecutionResult> {
+    let executor = Executor::from_session(session);
+    Ok(executor
+        .execute(shell_command.into(), execution_type.into())
+        .await?
+    .pop().expect("Somehow there wasn't any execution results in a single session command"))
 }
 
 pub async fn run_local_command(
@@ -545,4 +587,176 @@ pub async fn run_local_command(
     executor
         .execute(shell_command.into(), execution_type.into())
         .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// We use a ShellCommand struct to create all the shell commands that we require. It's
+    /// important that the commands created by this struct work as intended.
+
+    #[test]
+    fn shcomm_bad_commands() {
+        assert!(ShellCommand::from_command("echo hi").build().is_err());
+        assert!(ShellCommand::from_command_args(&["ec ho", "hi"])
+            .build()
+            .is_err());
+
+        let mut shell_command = ShellCommand::from_command("echo");
+        shell_command.command("ec ho");
+        assert!(shell_command.build().is_err());
+
+        let mut shell_command = ShellCommand::from_command("echo");
+        shell_command.command_args(&["ec ho", "hi"]);
+        assert!(shell_command.build().is_err());
+
+        let mut shell_command = ShellCommand::from_command("echo");
+        shell_command.interpreter("zsh");
+        assert!(shell_command.build().is_err());
+    }
+
+    #[test]
+    fn shcomm_valid_constructions() {
+        // Command constructions
+        let mut shell_command = ShellCommand::from_command("echo");
+        assert!(shell_command.build().is_ok());
+        assert!(shell_command.command(" echo").build().is_ok());
+        assert!(shell_command.command("echo ").build().is_ok());
+        assert!(shell_command.command(" echo ").build().is_ok());
+
+        // Command_args constructions
+        let mut shell_command =
+            ShellCommand::from_command_args(&["echo", "Hello", "World!"]);
+        assert!(shell_command.build().is_ok());
+        assert!(shell_command
+            .command_args(&["echo", "Hel lo", " Worl d! "])
+            .build()
+            .is_ok());
+        assert!(shell_command
+            .command_args(&[" echo ", " Hello", "World! "])
+            .build()
+            .is_ok());
+
+        // Args constructions
+        let mut shell_command = ShellCommand::from_command("echo");
+        assert!(shell_command
+            .args(&[" He llo ", " World !"])
+            .build()
+            .is_ok());
+
+        // Interpreter constructions
+        let mut shell_command = ShellCommand::from_command("echo");
+        assert!(shell_command.interpreter("bash").build().is_ok());
+        assert!(shell_command.interpreter("sh").build().is_ok());
+
+        // Directory/File constructions
+        let mut shell_command = ShellCommand::from_command("echo");
+        assert!(shell_command
+            .working_directory(Path::new("/srv/experimentah"))
+            .build()
+            .is_ok());
+        assert!(shell_command
+            .stdout_file(Path::new("/srv/experimentah/testfile.stdout"))
+            .build()
+            .is_ok());
+        assert!(shell_command
+            .stderr_file(Path::new("/srv/experimentah/testfile.stderr"))
+            .build()
+            .is_ok());
+
+        assert!(shell_command
+            .pid_file("/srv/experimentah/testfile.pid")
+            .build()
+            .is_ok());
+
+        assert!(shell_command
+            .advisory_lock_file("/srv/experimentah/testfile.lock")
+            .build()
+            .is_ok());
+    }
+
+    #[test]
+    fn shcomm_build_returns() {
+        let mut shell_command = ShellCommand::from_command("echo");
+        compare_commands(
+            shell_command.build().unwrap(),
+            &["bash", "-c", "echo"],
+        );
+        shell_command.command("ln");
+        compare_commands(shell_command.build().unwrap(), &["bash", "-c", "ln"]);
+        shell_command.args(&["-s", "-t", "my-favorite-directory"]);
+        compare_commands(
+            shell_command.build().unwrap(),
+            &["bash", "-c", "ln \"-s\" \"-t\" \"my-favorite-directory\""],
+        );
+
+        shell_command.command_args(&["echo", "Hello", "World!"]);
+        compare_commands(
+            shell_command.build().unwrap(),
+            &["bash", "-c", "echo \"Hello\" \"World!\""],
+        );
+
+        shell_command.interpreter("sh");
+        compare_commands(
+            shell_command.build().unwrap(),
+            &["sh", "-c", "echo \"Hello\" \"World!\""],
+        );
+
+        shell_command.working_directory(Path::new("/home/myuser/mydirectory"));
+        compare_commands(
+            shell_command.build().unwrap(),
+            &[
+                "sh",
+                "-c",
+                "cd /home/myuser/mydirectory && echo \"Hello\" \"World!\"",
+            ],
+        );
+
+        shell_command.stdout_file("/home/myuser/mydirectory/echofile.stdout");
+        compare_commands(
+            shell_command.build().unwrap(),
+            &[
+                "sh", "-c", "cd /home/myuser/mydirectory && echo \"Hello\" \"World!\" >/home/myuser/mydirectory/echofile.stdout",
+            ],
+        );
+
+        shell_command.stderr_file("/home/myuser/mydirectory/echofile.stderr");
+        compare_commands(
+            shell_command.build().unwrap(),
+            &[
+                "sh", "-c", "cd /home/myuser/mydirectory && echo \"Hello\" \"World!\" >/home/myuser/mydirectory/echofile.stdout 2>/home/myuser/mydirectory/echofile.stderr",
+            ],
+        );
+
+        shell_command.pid_file("/home/myuser/mydirectory/echofile.pid");
+        compare_commands(
+            shell_command.build().unwrap(),
+            &[
+                "sh", "-c", "cd /home/myuser/mydirectory && echo $$ >/home/myuser/mydirectory/echofile.pid; exec echo \"Hello\" \"World!\" >/home/myuser/mydirectory/echofile.stdout 2>/home/myuser/mydirectory/echofile.stderr",
+            ],
+        );
+
+        // How should we perform the flock. Unfortunately, at the moment using flock doesn't allow
+        // us to get our PID very easily. :/
+        // Probably, we'll need to have a separate case for PID capture when flock is in use
+        shell_command
+            .advisory_lock_file("/home/myuser/mydirectory/echofile.lock");
+        compare_commands(
+            shell_command.build().unwrap(),
+            &[
+                "flock", "-n", "/home/myuser/mydirectory/echofile.lock", "sh", "-c", "cd /home/myuser/mydirectory && echo $$ >/home/myuser/mydirectory/echofile.pid; exec echo \"Hello\" \"World!\" >/home/myuser/mydirectory/echofile.stdout 2>/home/myuser/mydirectory/echofile.stderr",
+            ],
+        );
+    }
+
+    fn compare_commands(command_1: Vec<String>, command_2: &[&str]) {
+        assert_eq!(
+            command_1,
+            command_2
+                .iter()
+                .map(|part| part.to_string())
+                .collect::<Vec<String>>(),
+        );
+    }
 }

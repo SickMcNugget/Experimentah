@@ -37,6 +37,10 @@ pub mod session;
 /// - storage/DATABASE
 pub const DEFAULT_STORAGE_DIR: &str = "storage";
 
+/// A list of important subdirectories for remote/local hosts.
+pub const SUBDIRECTORIES: [&str; 4] =
+    ["setup", "execute", "teardown", "exporters"];
+
 /// We want all our remote operations to occur in a well-known directory, so that we can avoid.
 ///
 /// Overwriting anything that's pre-existing on the target system.
@@ -45,9 +49,7 @@ pub const DEFAULT_STORAGE_DIR: &str = "storage";
 /// Any subdirectories created within `/srv/experimentah` are deleted once results are retrieved.
 pub const DEFAULT_REMOTE_DIR: &str = "/srv/experimentah";
 
-/// The results directory should be relative to both:
-/// - the variation directory: /srv/experimentah/TIMESTAMP/REPEAT_NO/results
-/// - the controller storage directory: storage/results
+/// The results directory should be relative to the local storage directory: [`DEFAULT_STORAGE_DIR`]/results
 pub const DEFAULT_RESULTS_DIR: &str = "results";
 
 /// We need a way to determine if any exporters are currently running on our remote machines
@@ -56,12 +58,14 @@ pub const DEFAULT_RESULTS_DIR: &str = "results";
 ///
 /// To do so, we use advisory locks inside this directory to state that the process is, in fact,
 /// currently running.
-pub const DEFAULT_EXPORTER_DIR: &str = "exporters";
+// pub const DEFAULT_EXPORTER_DIR: &str = "exporters";
 
 /// We need a way to retrieve the live output from a process, even in the event of a crash. This
 /// directory allows us to do that. It exists above the timestamped directory for any of the
 /// experiments, allowing us to check the directory immediately on A) connection to a remote host,
 /// or B) on startup of experimentah.
+///
+/// The live directory is a subdirectory of the REMOTE_DIR
 ///
 /// Similar to the storage directory, processes inside the live directory are organised based on
 /// their functionality. Some examples are:
@@ -69,7 +73,7 @@ pub const DEFAULT_EXPORTER_DIR: &str = "exporters";
 /// - live/execute
 /// - live/teardown
 /// - live/exporters
-pub const DEFAULT_LIVE_DIR: &str = "/srv/experimentah/live";
+pub const DEFAULT_LIVE_DIR: &str = "live";
 
 /// By default, we currently assume that bash is the default interpreter and that it will be
 /// available on PATH in some manner by the remote SSH user.
