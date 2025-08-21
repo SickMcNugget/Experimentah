@@ -4,9 +4,9 @@ use crate::parse::{
     Experiment, ExperimentRuns, Exporter, Host, RemoteExecution,
 };
 use crate::{
-    file_to_deps_path, time_since_epoch, variation_dir_parts,
-    DEFAULT_EXPORTER_DIR, DEFAULT_REMOTE_DIR, DEFAULT_RESULTS_DIR,
-    DEFAULT_STORAGE_DIR,
+    command, file_to_deps_path, time_since_epoch, variation_dir_parts,
+    DEFAULT_LIVE_DIR, DEFAULT_REMOTE_DIR, DEFAULT_RESULTS_DIR,
+    DEFAULT_STORAGE_DIR, SUBDIRECTORIES,
 };
 
 /// Internally I've just set the queue to begin with a capacity of 32 potential [`ExperimentRuns`].
@@ -19,15 +19,19 @@ const DEFAULT_MAX_EXPERIMENTS: usize = 32;
 /// checks on the queue.
 const DEFAULT_POLL_SLEEP: Duration = Duration::from_millis(250);
 
+static KILL_EXPORTERS: AtomicBool = AtomicBool::new(false);
+
 use log::{debug, error, info};
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::time::Duration;
 use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
 
-use crate::ssh::{self, BackgroundProcesses, Sessions};
+use crate::command::{ExecutionResult, ExecutionType, ShellCommand, SpawnType};
+use crate::session::{self, Sessions};
 
 /// A specialised [`Result`] type for runtime problems with experiments
 ///
@@ -38,12 +42,22 @@ use crate::ssh::{self, BackgroundProcesses, Sessions};
 /// otherwise a direct mapping to [`Result`].
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// To create long-running exporters, we spawn them in the background and
-/// retain a handle to them for the rest of the experiment.
-/// The [`Exporters`] type represents this mapping.
+/// We represent exporters internally by the Child-type process that they are. Since different
+/// libraries have different implementations of a Child type ([`tokio::process::Child`],
+/// [`openssh::Child`]), we have to have an enum that can handle both cases.
 ///
-/// In the future, this type may also take into account exporters run on the local system, too.
-pub type Exporters = HashMap<String, BackgroundProcesses>;
+/// The [`Exporters`] type represents this mapping.
+pub type Exporters = HashMap<String, Vec<SpawnType>>;
+
+/// To create long-running exporters, we spawn them in the background and retain a handle to them
+/// for the rest of the experiment.
+/// The [`ExporterHandles`] type represents this mapping
+pub type ExportersHandles = HashMap<String, ExporterHandles>;
+
+/// Since each exporter can have multiple hosts within it's configuration, we expect that every
+/// exporter will be spawned on multiple hosts, meaning that the smallest divisible unit for
+/// spawned exporters should be a vector of them.
+pub type ExporterHandles = Vec<JoinHandle<Result<()>>>;
 
 /// The error type for runtime errors.
 ///
@@ -57,7 +71,10 @@ pub type Exporters = HashMap<String, BackgroundProcesses>;
 pub enum Error {
     IOError(String, std::io::Error),
     TimeError(String, std::time::SystemTimeError),
+    CommandError(String, crate::command::Error),
     Generic(String),
+    JoinError(String, tokio::task::JoinError),
+    OpenSSHError(String, openssh::Error),
 }
 
 impl std::fmt::Display for Error {
@@ -67,6 +84,15 @@ impl std::fmt::Display for Error {
                 write!(f, "{message}: {source}")
             }
             Error::TimeError(ref message, ref source) => {
+                write!(f, "{message}: {source}")
+            }
+            Error::CommandError(ref message, ref source) => {
+                write!(f, "{message}: {source}")
+            }
+            Error::JoinError(ref message, ref source) => {
+                write!(f, "{message}: {source}")
+            }
+            Error::OpenSSHError(ref message, ref source) => {
                 write!(f, "{message}: {source}")
             }
             Error::Generic(ref message) => {
@@ -81,6 +107,9 @@ impl std::error::Error for Error {
         match *self {
             Error::IOError(.., ref source) => Some(source),
             Error::TimeError(.., ref source) => Some(source),
+            Error::CommandError(.., ref source) => Some(source),
+            Error::JoinError(.., ref source) => Some(source),
+            Error::OpenSSHError(.., ref source) => Some(source),
             Error::Generic(..) => None,
         }
     }
@@ -118,10 +147,18 @@ impl From<std::time::SystemTimeError> for Error {
     }
 }
 
-impl From<ssh::Error> for Error {
-    /// Converts from a [`crate::ssh::Error`] into an [`Error::Generic`] with the message
-    /// directly taken from [`crate::ssh::Error`] (without context)
-    fn from(value: ssh::Error) -> Self {
+impl From<command::Error> for Error {
+    /// Converts from a [`command::Error`] into an [`Error::CommandError`] with a
+    /// predefined "Command error" context message.
+    fn from(value: command::Error) -> Self {
+        Error::CommandError("Command error".to_string(), value)
+    }
+}
+
+impl From<session::Error> for Error {
+    /// Converts from a [`crate::session::Error`] into an [`Error::Generic`] with the message
+    /// directly taken from [`crate::session::Error`] (without context)
+    fn from(value: session::Error) -> Self {
         Error::Generic(value.to_string())
     }
 }
@@ -137,6 +174,18 @@ impl From<&str> for Error {
     /// Converts from a &str message to an [`Error::Generic`].
     fn from(value: &str) -> Self {
         Error::Generic(value.to_string())
+    }
+}
+
+impl From<tokio::task::JoinError> for Error {
+    fn from(value: tokio::task::JoinError) -> Self {
+        Self::JoinError("tokio task join error".to_string(), value)
+    }
+}
+
+impl From<openssh::Error> for Error {
+    fn from(value: openssh::Error) -> Self {
+        Self::OpenSSHError("tokio task join error".to_string(), value)
     }
 }
 
@@ -157,8 +206,11 @@ pub struct ExperimentRunner {
     pub current_run: AtomicU16,
     /// The queue containing experiments sent in from clients.
     pub experiment_queue: ExperimentQueue,
-
+    /// A configuration which mainly contains important file paths for storing
+    /// experiment/controller information.
     pub configuration: ExperimentRunnerConfiguration,
+    /// Contains a list of the running exporters for the current experiment
+    live_exporters: Mutex<ExportersHandles>,
 }
 
 /// The [`ExperimentRunner`] requires a great deal of configuration options (paths, etc) which it
@@ -171,17 +223,18 @@ pub struct ExperimentRunnerConfiguration {
     pub max_experiments: usize,
     /// The storage directory to use for storing experiment data
     pub storage_dir: PathBuf,
-    /// The subdirectory underneath [`Self::storage_dir`] and [`Self::remote_dir`] which experiment
+    /// The subdirectory underneath [`Self::storage_dir`] and [`Self::experimentation_dir`] which experiment
     /// results are stored in
     pub results_dir: PathBuf,
     /// The directory to use on remote hosts when running experiments.
     ///
     /// NOTE: This is likely to be deprecated in favour of a directory that an SSH user is
     /// guaranteed to have access to. (likely to be either $HOME or /tmp).
-    pub remote_dir: PathBuf,
-    /// The subdirectory underneath [`Self::remote_dir`] to store information relating to currently
-    /// running exporters.
-    pub exporter_dir: PathBuf,
+    pub experimentation_dir: PathBuf,
+
+    /// The subdirectory underneath [`Self::experimentation_dir`] to store
+    /// information relating to currently running exporters
+    pub live_dir: PathBuf,
 }
 
 impl Default for ExperimentRunnerConfiguration {
@@ -191,9 +244,29 @@ impl Default for ExperimentRunnerConfiguration {
             max_experiments: DEFAULT_MAX_EXPERIMENTS,
             storage_dir: PathBuf::from(DEFAULT_STORAGE_DIR),
             results_dir: PathBuf::from(DEFAULT_RESULTS_DIR),
-            remote_dir: PathBuf::from(DEFAULT_REMOTE_DIR),
-            exporter_dir: PathBuf::from(DEFAULT_EXPORTER_DIR),
+            experimentation_dir: PathBuf::from(DEFAULT_REMOTE_DIR),
+            live_dir: PathBuf::from(DEFAULT_LIVE_DIR),
         }
+    }
+}
+
+impl ExperimentRunnerConfiguration {
+    /// Returns directories that need to be created for experiments to run correctly
+    fn directories(&self) -> Vec<PathBuf> {
+        let mut directories = Vec::new();
+
+        for directory in SUBDIRECTORIES {
+            directories.push(
+                self.experimentation_dir
+                    .join(&self.live_dir)
+                    .join(directory),
+            );
+        }
+        directories
+    }
+
+    fn live_dir(&self, subdir: &str) -> PathBuf {
+        self.experimentation_dir.join(&self.live_dir).join(subdir)
     }
 }
 
@@ -209,6 +282,7 @@ impl Default for ExperimentRunner {
             current_runs: Default::default(),
             current_experiment: Default::default(),
             current_run: Default::default(),
+            live_exporters: Default::default(),
         }
     }
 }
@@ -297,20 +371,17 @@ impl ExperimentRunner {
             );
 
             let hosts = Self::unique_hosts_for_all_experiments(&experiments);
-            let sessions = ssh::connect_to_hosts(&hosts).await?;
+            let sessions = session::connect_to_hosts(&hosts).await?;
 
             let experiment_directory = PathBuf::from(format!(
                 "{}/{ts}",
-                self.configuration.remote_dir.display()
+                self.configuration.experimentation_dir.display()
             ));
 
             // Ensure that our 'well-known' directories are present
-            ssh::make_directories(
+            session::make_directories(
                 &sessions,
-                &[
-                    &self.configuration.remote_dir,
-                    &self.configuration.exporter_dir,
-                ],
+                &self.configuration.directories(),
             )
             .await?;
 
@@ -321,7 +392,7 @@ impl ExperimentRunner {
             // resources for that specific experiment to instead populate the
             // /srv/experimentah/<timestamp>/ directory.
             let files = Self::unique_files_for_all_experiments(&experiments);
-            ssh::upload(&sessions, &files, &experiment_directory).await?;
+            session::upload(&sessions, &files, &experiment_directory).await?;
 
             // TODO(joren): For dependencies, the current solution is to upload them normally, and
             // then adjust them afterwards to be in the correct subdirectory. It's definitely dumb
@@ -344,7 +415,8 @@ impl ExperimentRunner {
                         &repeat_directory.join(&experiment.name);
 
                     self.update_current_experiment(experiment, run).await;
-                    ssh::make_directory(&sessions, variation_directory).await?;
+                    session::make_directory(&sessions, variation_directory)
+                        .await?;
 
                     // Here we symlink our script dependencies within the current repeat directory
                     Self::symlink_dependencies(
@@ -360,14 +432,21 @@ impl ExperimentRunner {
                         &experiment.execute, &experiment.dependencies
                     );
 
-                    let _exporters = Self::start_exporters(
+                    let exporters = Self::start_exporters(
                         &sessions,
                         &experiment.exporters,
-                        &experiment_directory,
+                        &self.configuration.live_dir("exporters"),
                         variation_directory,
                     )
                     .await?;
+
+                    {
+                        let mut live_exporters =
+                            self.live_exporters.lock().await;
+                        *live_exporters = exporters;
+                    }
                     info!("Started exporters");
+                    tokio::time::sleep(Duration::from_secs(5)).await;
 
                     // TODO(joren): We want to make sure that our setup/teardown
                     // is run from the *variation* directory, and not the experiment
@@ -395,9 +474,6 @@ impl ExperimentRunner {
                     .await?;
                     info!("Variation complete");
 
-                    // ssh::upload(&sessions, source_path, destination_path)
-
-                    // run_variation(&sessions, &experiment);
                     Self::run_remote_executions(
                         &sessions,
                         &experiment.teardown,
@@ -406,6 +482,24 @@ impl ExperimentRunner {
                     )
                     .await?;
                     info!("Variation teardown complete");
+
+                    // Time for us to close our exporters
+                    {
+                        KILL_EXPORTERS.store(true, Ordering::Relaxed);
+
+                        let mut live_exporters =
+                            self.live_exporters.lock().await;
+                        for (_exporter_name, handles) in live_exporters.drain()
+                        {
+                            for handle in handles {
+                                handle.await??;
+                            }
+                        }
+
+                        assert!(live_exporters.len() == 0);
+                        KILL_EXPORTERS.store(false, Ordering::Relaxed);
+                    }
+                    info!("Stopped all exporters for variation");
 
                     Self::unlink_dependencies(
                         &sessions,
@@ -502,25 +596,31 @@ impl ExperimentRunner {
                     .to_string_lossy()
             ));
 
-            ssh::make_directory(sessions, &execute_directory).await?;
-            // ssh::run_command_at(sessions, &command_args, experiment_directory)
-            //     .await?;
+            session::make_directory(sessions, &execute_directory).await?;
 
-            let mut command_args = vec!["mv".to_string()];
+            let mut shell_command = ShellCommand::from_command("mv");
+            let mut args = vec![];
             for script in experiment.dependencies.iter() {
-                command_args.push(
+                args.push(
                     script.file_name().unwrap().to_string_lossy().to_string(),
                 );
             }
-            command_args.push(
+            args.push(
                 execute_directory
                     .file_name()
                     .unwrap()
                     .to_string_lossy()
                     .to_string(),
             );
-            ssh::run_command_at(sessions, &command_args, experiment_directory)
-                .await?;
+            shell_command.args(&args);
+            shell_command.working_directory(experiment_directory);
+
+            command::run_command(
+                sessions,
+                shell_command,
+                ExecutionType::Output,
+            )
+            .await?;
         }
         Ok(())
     }
@@ -540,12 +640,50 @@ impl ExperimentRunner {
         files
     }
 
-    //     fn unique_dependencies_for_all_experiments(
-    //         experiments: &[Experiment],
-    //     ) -> Vec<&Path> {
-    //         let mut files: Vec<&Path> = experiments.
-    // iter().flat_map(|experiment| experiment.dependencies()).collect();
-    //     }
+    async fn setup_exporters(
+        sessions: &Sessions,
+        exporters: &[Exporter],
+        variation_directory: &Path,
+    ) -> Result<()> {
+        let mut futures: Vec<JoinHandle<Result<()>>> = Vec::new();
+
+        let exporters_clone = exporters.to_vec();
+        for exporter in exporters_clone.into_iter() {
+            let exporter_sessions =
+                Self::filter_host_sessions(sessions, &exporter.hosts);
+
+            let exporter_clone = exporter.clone();
+            let variation_directory_clone = variation_directory.to_path_buf();
+
+            futures.push(tokio::task::spawn(async move {
+                for setup in exporter_clone.setup.iter() {
+                    let command_args =
+                        shlex::split(setup).ok_or_else(|| {
+                            Error::from(format!(
+                                "Invalid setup command for exporter '{}': {}",
+                                exporter.name, setup
+                            ))
+                        })?;
+                    let mut shell_command =
+                        ShellCommand::from_command_args(&command_args);
+                    shell_command.working_directory(&variation_directory_clone);
+                    command::run_command(
+                        &exporter_sessions,
+                        shell_command,
+                        ExecutionType::Output,
+                    )
+                    .await?;
+                }
+                Ok(())
+            }));
+        }
+
+        for future in futures {
+            future.await??;
+        }
+
+        Ok(())
+    }
 
     /// Starts long-running exporters, which are expected to collect
     /// system-level metrics whilst an experiment is running.
@@ -553,72 +691,99 @@ impl ExperimentRunner {
     async fn start_exporters(
         sessions: &Sessions,
         exporters: &[Exporter],
-        _experiment_directory: &Path,
+        exporter_dir: &Path,
         variation_directory: &Path,
-    ) -> Result<Exporters> {
-        let mut live_exporters: Exporters = Exporters::default();
+    ) -> Result<ExportersHandles> {
+        let mut exporters_handles = ExportersHandles::new();
+
+        // We now perform exporter setup in parallel, nice!
+        // NOTE: each step of the setup for each exporter is still serial, as intended.
+        Self::setup_exporters(sessions, exporters, variation_directory).await?;
+
         for exporter in exporters.iter() {
             let exporter_sessions =
                 Self::filter_host_sessions(sessions, &exporter.hosts);
 
-            // TODO(joren): It's okay now since we're early in development to do this serially, but
-            // ideally in the future the setup process should be done in parallel, if possible.
+            let mut exporter_files = exporter.shell_files();
+            exporter_files.set_base(exporter_dir);
 
-            for setup in exporter.setup.iter() {
-                // TODO(joren): Handle shlex error
-                let setup_comm = shlex::split(setup).unwrap();
-                ssh::run_command_at(
-                    &exporter_sessions,
-                    &setup_comm,
-                    variation_directory,
-                )
-                .await?;
-            }
+            let parts = shlex::split(&exporter.command).ok_or_else(|| {
+                Error::from(format!(
+                    "Invalid exporter command for exporter '{}': {}",
+                    exporter.name, &exporter.command
+                ))
+            })?;
+            let mut shell_command = ShellCommand::from_command_args(&parts);
+            shell_command
+                .working_directory(variation_directory)
+                .stdout_file(&exporter_files.stdout)
+                .stderr_file(&exporter_files.stderr)
+                .pid_file(&exporter_files.pid)
+                .advisory_lock_file(&exporter_files.lock);
 
-            let (stdout, stderr) = exporter.redir_files();
-
-            //TODO(joren): Handle shlex error
-            let comm: Vec<String> = shlex::split(&exporter.command)
-                .unwrap()
-                .into_iter()
-                .chain([format!(">{stdout}"), format!("2>{stderr}")])
-                .collect();
-
-            // How should we be handling commands that can either be run locally or remotely,
-            // depending on the hostname provided? It might be worth storing sessions inside of the
-            // ShellCommand struct so that we can determine whether the command needs to be run
-            // remotely or not. We could also use a trait that dispatches a ShellCommand to either
-            // a RemoteHost or a LocalHost, which would likely serve to be a more effective
-            // mechanism.
-            let exporter_processes = ssh::run_background_command_at(
+            let exporter_processes = command::run_command(
                 &exporter_sessions,
-                &comm,
-                variation_directory,
+                shell_command,
+                ExecutionType::Spawn,
             )
             .await?;
 
-            live_exporters.insert(exporter.name.clone(), exporter_processes);
-            // tokio::time::sleep(Duration::from_secs(5)).await;
+            let exporter_processes: Vec<SpawnType> = exporter_processes
+                .into_iter()
+                .map(|exporter_process| {
+                    if let ExecutionResult::Spawn(child) = exporter_process {
+                        child
+                    } else {
+                        // Since we specified ExecutionType::Spawn, we should definitely be getting
+                        // ExecutionResult::Spawn back from this function
+                        panic!();
+                    }
+                })
+                .collect();
 
-            // info!("Started exporter '{}'", exporter.name);
-            // dbg!(running_exporters);
+            // Here, we register the exporters with our experiment runner
 
-            // tokio::time::sleep(Duration::from_secs(60)).await;
+            let mut handles: ExporterHandles = Vec::new();
+            for exporter_process in exporter_processes.into_iter() {
+                // let exporter_name_clone = exporter.name.clone();
+                let pid_file = exporter_files.pid.clone();
+                handles.push(tokio::spawn(async move {
+                    while !KILL_EXPORTERS.load(Ordering::Relaxed) {
+                        tokio::time::sleep(DEFAULT_POLL_SLEEP).await;
+                    }
 
-            // The exporter needs a file to be created which we can refer to in the event
-            // of an experimentah crash.
-            // We can make use of the flock command when running our exporters
-            // match ssh::run_background_command(&exporter_sessions, &comm).await {
-            //     Ok(child) => info!("Started exporter '{}'", exporter.name),
-            //     Err(e) => {
-            //         error!(
-            //             "Failed to start exporter '{}': {}",
-            //             exporter.name, e
-            //         )
-            //     }
-            // }
+                    match exporter_process {
+                        SpawnType::SSH(process) => {
+                            // We need to wait until an atomic value is set to KILL our exporter
+                            // We need to kill the remote process
+                            let session = process.session();
+                            let command = ShellCommand::from_command_args(&[
+                                "kill".into(),
+                                "-KILL".into(),
+                                format!(
+                                    "$(cat {})",
+                                    pid_file.to_string_lossy()
+                                ),
+                            ]);
+                            command::run_command_openssh_session(
+                                session,
+                                command,
+                                ExecutionType::Status,
+                            )
+                            .await?;
+                        }
+                        SpawnType::Tokio(mut process) => {
+                            process.kill().await?;
+                        }
+                    }
+                    Ok(())
+                }));
+            }
+
+            exporters_handles.insert(exporter.name.clone(), handles);
         }
-        Ok(live_exporters)
+
+        Ok(exporters_handles)
     }
 
     //TODO(joren): We need remote commands to write their outputs to a file somewhere.
@@ -657,7 +822,7 @@ impl ExperimentRunner {
             // assert!(remotescript.exists());
 
             let remote_script = experiment_directory.join(remote_script);
-            ssh::run_script_at(
+            session::run_script_at(
                 &setup_sessions,
                 remote_script,
                 variation_directory,
@@ -678,7 +843,7 @@ impl ExperimentRunner {
         dependencies: &[PathBuf],
         experiment_directory: &Path,
         variation_directory: &Path,
-    ) -> Result<()> {
+    ) -> Result<Vec<ExecutionResult>> {
         let filter_sessions =
             Self::filter_host_sessions(sessions, &remote_execution.hosts);
 
@@ -687,20 +852,29 @@ impl ExperimentRunner {
             remote_execution.scripts.first().unwrap(),
         );
 
-        let mut command = vec![
+        let command_args: Vec<String> = [
             "ln".to_string(),
-            "-s".into(),
-            "-t".into(),
-            variation_directory.to_string_lossy().into(),
-        ];
-        for dependency in dependencies.iter() {
-            let dep = deps_path.join(dependency.file_name().unwrap());
-            command.push(dep.to_string_lossy().to_string());
-        }
+            "-s".to_string(),
+            "-t".to_string(),
+            variation_directory.to_string_lossy().to_string(),
+        ]
+        .into_iter()
+        .chain(dependencies.iter().map(|dep| {
+            deps_path
+                .join(dep.file_name().unwrap())
+                .to_string_lossy()
+                .to_string()
+        }))
+        .collect();
 
-        ssh::run_command(&filter_sessions, &command)
-            .await
-            .map_err(Error::from)
+        let shell_command = ShellCommand::from_command_args(&command_args);
+        command::run_command(
+            &filter_sessions,
+            shell_command,
+            ExecutionType::Output,
+        )
+        .await
+        .map_err(Error::from)
     }
 
     async fn unlink_dependencies(
@@ -712,15 +886,26 @@ impl ExperimentRunner {
         let filter_sessions =
             Self::filter_host_sessions(sessions, &remote_execution.hosts);
 
-        let mut command = vec!["rm".to_string()];
-        for dependency in dependencies.iter() {
-            let dep = variation_directory.join(dependency.file_name().unwrap());
-            command.push(dep.to_string_lossy().to_string());
-        }
+        let args: Vec<String> = dependencies
+            .iter()
+            .map(|dependency| {
+                variation_directory
+                    .join(dependency.file_name().unwrap())
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .collect();
 
-        ssh::run_command(&filter_sessions, &command)
-            .await
-            .map_err(Error::from)
+        let mut shell_command = ShellCommand::from_command("rm");
+        shell_command.args(&args);
+        command::run_command(
+            &filter_sessions,
+            shell_command,
+            ExecutionType::Output,
+        )
+        .await?;
+        Ok(())
+        // .map_err(Error::from)
     }
 
     async fn collect_results(
@@ -746,7 +931,7 @@ impl ExperimentRunner {
             ))
         })?;
 
-        ssh::download(sessions, &[variation_directory], &local_results_dir)
+        session::download(sessions, &[variation_directory], &local_results_dir)
             .await?;
 
         Ok(())

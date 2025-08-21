@@ -807,12 +807,34 @@ impl Exporter {
         }
     }
 
-    /// Returns the filenames for the redirected stdout and stderr streams
-    pub fn redir_files(&self) -> (String, String) {
-        (
-            format!("{}.stdout", self.name),
-            format!("{}.stderr", self.name),
-        )
+    /// Returns the filenames for the future shell command.
+    pub fn shell_files(&self) -> ExporterFiles {
+        ExporterFiles {
+            stdout: PathBuf::from(format!("{}.stdout", self.name)),
+            stderr: PathBuf::from(format!("{}.stderr", self.name)),
+            pid: PathBuf::from(format!("{}.pid", self.name)),
+            // Not sure if we should use this or just the PID file. This has the advantage of not
+            // overlapping with a PID file if there is some reason that we want advisory locking,
+            // but not PID tracking.
+            lock: PathBuf::from(format!("{}.lock", self.name)),
+        }
+    }
+}
+
+pub struct ExporterFiles {
+    pub stdout: PathBuf,
+    pub stderr: PathBuf,
+    pub pid: PathBuf,
+    pub lock: PathBuf,
+}
+
+impl ExporterFiles {
+    pub fn set_base<P: AsRef<Path>>(&mut self, path: P) {
+        let path = path.as_ref();
+        self.stdout = path.join(&self.stdout);
+        self.stderr = path.join(&self.stderr);
+        self.pid = path.join(&self.pid);
+        self.lock = path.join(&self.lock);
     }
 }
 
@@ -1146,7 +1168,7 @@ pub fn generate_experiments<P: AsRef<Path>>(
     Ok((experiment_config.runs, experiments))
 }
 
-fn check_file_exists<P: AsRef<Path>>(file: P) -> io::Result<()> {
+pub fn check_file_exists<P: AsRef<Path>>(file: P) -> io::Result<()> {
     let exists = file.as_ref().try_exists()?;
 
     match exists {
@@ -1158,7 +1180,7 @@ fn check_file_exists<P: AsRef<Path>>(file: P) -> io::Result<()> {
     }
 }
 
-fn check_files_exist<P: AsRef<Path>>(files: &[P]) -> io::Result<()> {
+pub fn check_files_exist<P: AsRef<Path>>(files: &[P]) -> io::Result<()> {
     for file in files.iter() {
         check_file_exists(file)?;
     }
