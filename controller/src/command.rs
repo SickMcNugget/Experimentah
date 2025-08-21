@@ -709,7 +709,14 @@ mod tests {
             &[
                 "sh",
                 "-c",
-                "cd /home/myuser/mydirectory && echo \"Hello\" \"World!\"",
+                concat!(
+                    "cd ",
+                    "/home/myuser/mydirectory ",
+                    "&& ",
+                    "echo ",
+                    "\"Hello\" ",
+                    "\"World!\"",
+                ),
             ],
         );
 
@@ -717,7 +724,17 @@ mod tests {
         compare_commands(
             shell_command.build().unwrap(),
             &[
-                "sh", "-c", "cd /home/myuser/mydirectory && echo \"Hello\" \"World!\" >/home/myuser/mydirectory/echofile.stdout",
+                "sh",
+                "-c",
+                concat!(
+                    "cd ",
+                    "/home/myuser/mydirectory ",
+                    "&& ",
+                    "echo ",
+                    "\"Hello\" ",
+                    "\"World!\" ",
+                    ">/home/myuser/mydirectory/echofile.stdout"
+                ),
             ],
         );
 
@@ -725,7 +742,18 @@ mod tests {
         compare_commands(
             shell_command.build().unwrap(),
             &[
-                "sh", "-c", "cd /home/myuser/mydirectory && echo \"Hello\" \"World!\" >/home/myuser/mydirectory/echofile.stdout 2>/home/myuser/mydirectory/echofile.stderr",
+                "sh",
+                "-c",
+                concat!(
+                    "cd ",
+                    "/home/myuser/mydirectory ",
+                    "&& ",
+                    "echo ",
+                    "\"Hello\" ",
+                    "\"World!\" ",
+                    ">/home/myuser/mydirectory/echofile.stdout ",
+                    "2>/home/myuser/mydirectory/echofile.stderr"
+                ),
             ],
         );
 
@@ -733,7 +761,22 @@ mod tests {
         compare_commands(
             shell_command.build().unwrap(),
             &[
-                "sh", "-c", "cd /home/myuser/mydirectory && echo $$ >/home/myuser/mydirectory/echofile.pid; exec echo \"Hello\" \"World!\" >/home/myuser/mydirectory/echofile.stdout 2>/home/myuser/mydirectory/echofile.stderr",
+                "sh",
+                "-c",
+                concat!(
+                    "cd ",
+                    "/home/myuser/mydirectory ",
+                    "&& ",
+                    "echo ",
+                    "$$ ",
+                    ">/home/myuser/mydirectory/echofile.pid; ",
+                    "exec ",
+                    "echo ",
+                    "\"Hello\" ",
+                    "\"World!\" ",
+                    ">/home/myuser/mydirectory/echofile.stdout ",
+                    "2>/home/myuser/mydirectory/echofile.stderr"
+                ),
             ],
         );
 
@@ -745,7 +788,25 @@ mod tests {
         compare_commands(
             shell_command.build().unwrap(),
             &[
-                "flock", "-n", "/home/myuser/mydirectory/echofile.lock", "sh", "-c", "cd /home/myuser/mydirectory && echo $$ >/home/myuser/mydirectory/echofile.pid; exec echo \"Hello\" \"World!\" >/home/myuser/mydirectory/echofile.stdout 2>/home/myuser/mydirectory/echofile.stderr",
+                "flock",
+                "-n",
+                "/home/myuser/mydirectory/echofile.lock",
+                "sh",
+                "-c",
+                concat!(
+                    "cd ",
+                    "/home/myuser/mydirectory ",
+                    "&& ",
+                    "echo ",
+                    "$$ ",
+                    ">/home/myuser/mydirectory/echofile.pid; ",
+                    "exec ",
+                    "echo ",
+                    "\"Hello\" ",
+                    "\"World!\" ",
+                    ">/home/myuser/mydirectory/echofile.stdout ",
+                    "2>/home/myuser/mydirectory/echofile.stderr"
+                ),
             ],
         );
     }
