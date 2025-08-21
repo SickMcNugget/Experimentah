@@ -52,14 +52,6 @@ pub const DEFAULT_REMOTE_DIR: &str = "/srv/experimentah";
 /// The results directory should be relative to the local storage directory: [`DEFAULT_STORAGE_DIR`]/results
 pub const DEFAULT_RESULTS_DIR: &str = "results";
 
-/// We need a way to determine if any exporters are currently running on our remote machines
-/// (meaning that they were launched by Experimentah in either the current session or a previous
-/// one).
-///
-/// To do so, we use advisory locks inside this directory to state that the process is, in fact,
-/// currently running.
-// pub const DEFAULT_EXPORTER_DIR: &str = "exporters";
-
 /// We need a way to retrieve the live output from a process, even in the event of a crash. This
 /// directory allows us to do that. It exists above the timestamped directory for any of the
 /// experiments, allowing us to check the directory immediately on A) connection to a remote host,
