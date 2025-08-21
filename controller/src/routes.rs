@@ -7,7 +7,11 @@ use std::{
 
 use axum::{
     body::Bytes,
-    extract::{Multipart, State},
+    extract::{
+        ws::{Message, WebSocket},
+        Multipart, State, WebSocketUpgrade,
+    },
+    response::Response,
     Json,
 };
 use log::info;
@@ -110,6 +114,76 @@ pub async fn upload(mut multipart: Multipart) -> Result<(), String> {
     info!("Saved file {:?} to {:?}", path.file_name().unwrap(), path);
 
     Ok(())
+}
+
+pub async fn ws_handler(
+    ws: WebSocketUpgrade,
+    State(run_state): State<RunState>,
+) -> Response {
+    ws.on_upgrade(|socket| handle_socket(socket, run_state))
+}
+
+async fn handle_socket(mut socket: WebSocket, runner: RunState) {
+    // We receive one message on this websocket?
+    if let Some(msg) = socket.recv().await {
+        if let Ok(msg) = msg {
+            process_message(msg);
+        }
+    } else {
+        eprintln!("Websocket abruptly closed");
+    }
+
+    // Assume after we process the message that we now have both a host and a filename/exporter
+    // name
+
+    let thing = Thing {
+        host: String::from("root@prod-agent1.recsa.prod"),
+        filetype: FileType::Exporter,
+        identifier: String::from("sar-exporter"),
+    };
+
+    // We need to setup a *follow* for the file requested, that allows us to tune into the
+    // stdout/stderr of the file, which we can stream as required.
+    let _conn = runner.follow(thing);
+
+    let send_task = tokio::spawn(async move {
+        while let Some(output) = _conn.recv().await {
+            if socket.send(output).await.is_err() {
+                eprintln!(
+                    "An error occurred whilst sharing data with someone ig"
+                );
+            }
+        }
+    });
+}
+
+pub struct Thing {
+    host: String,
+    identifier: String,
+    filetype: FileType,
+}
+
+fn process_message(msg: Message) {
+    match msg {
+        Message::Close(c) => {
+            if let Some(cf) = c {
+                println!(
+                    ">>> Received a close message with code {} and reason `{}`",
+                    cf.code, cf.reason
+                );
+            } else {
+                eprintln!(
+                    ">>> Somehow a close message was sent without a closeframe"
+                );
+            }
+        }
+        Message::Binary(d) => {
+            println!(">>> sent {} bytes: {d:?}", d.len());
+        }
+        _ => {
+            panic!("Unexpected message type received");
+        }
+    }
 }
 
 #[cfg(test)]

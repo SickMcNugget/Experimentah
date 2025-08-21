@@ -891,6 +891,9 @@ pub enum FileType {
     /// Dependency files are (currently) files that are required for the main script of an
     /// experiment to function correctly. In the future dependencies may exist more broadly.
     Dependency,
+    /// Exporter files are files that are needed to run an exporter.
+    /// Of course, exporters can also be run using just a simple command instead
+    Exporter,
 }
 
 impl Display for FileType {
@@ -900,6 +903,7 @@ impl Display for FileType {
             Self::Teardown => write!(f, "teardown"),
             Self::Execute => write!(f, "execute"),
             Self::Dependency => write!(f, "dependency"),
+            Self::Exporter => write!(f, "exporter"),
         }
     }
 }
@@ -912,6 +916,7 @@ impl FromStr for FileType {
             "teardown" => Self::Teardown,
             "execute" => Self::Execute,
             "dependency" => Self::Dependency,
+            "exporter" => Self::Dependency,
             &_ => Err(Error::ValidationError(format!(
                 "Invalid remote execution type, got {s}"
             )))?,
@@ -937,6 +942,8 @@ impl TryFrom<&Path> for FileType {
             Ok(Self::Teardown)
         } else if filename.contains("dependency") {
             Ok(Self::Dependency)
+        } else if filename.contains("exporter") {
+            Ok(Self::Exporter)
         } else {
             Ok(Self::Execute)
         }
