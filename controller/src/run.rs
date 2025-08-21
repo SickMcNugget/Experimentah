@@ -936,6 +936,10 @@ impl ExperimentRunner {
 
         Ok(())
     }
+
+    pub fn follow(&self, thing: crate::routes::Thing) {
+        todo!()
+    }
 }
 
 // #[cfg(test)]
