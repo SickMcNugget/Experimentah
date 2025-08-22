@@ -1,8 +1,5 @@
 use std::{
-    os::unix::fs::PermissionsExt,
-    path::PathBuf,
-    str::FromStr,
-    sync::{atomic::Ordering, Arc},
+    os::unix::fs::PermissionsExt, path::PathBuf, str::FromStr, sync::Arc,
 };
 
 use axum::{
@@ -15,6 +12,7 @@ use axum::{
     Json,
 };
 use log::info;
+use tokio::sync::Mutex;
 
 use crate::{
     parse::{self, Config, ExperimentConfig, FileType},
@@ -65,11 +63,13 @@ pub async fn run(
 /// Retrieves the current state of the [`crate::run::ExperimentRunner`].
 pub async fn status(State(run_state): State<RunState>) -> String {
     let runner = &run_state;
-    let current_experiment = runner.current_experiment.lock().await;
-    let current_run = runner.current_run.load(Ordering::Relaxed);
-    let current_runs = runner.current_runs.load(Ordering::Relaxed);
 
-    format!("Current Experiment: {current_experiment:?}, Current run: {current_run:?}/{current_runs:?}")
+    runner.current.status().await
+    // let current_experiment = runner.current_experiment.lock().await;
+    // let current_run = runner.current_run.load(Ordering::Relaxed);
+    // let current_runs = runner.current_runs.load(Ordering::Relaxed);
+    //
+    // format!("Current Experiment: {current_experiment:?}, Current run: {current_run:?}/{current_runs:?}")
 }
 
 pub async fn upload(mut multipart: Multipart) -> Result<(), String> {
@@ -144,23 +144,34 @@ async fn handle_socket(mut socket: WebSocket, runner: RunState) {
 
     // We need to setup a *follow* for the file requested, that allows us to tune into the
     // stdout/stderr of the file, which we can stream as required.
-    let _conn = runner.follow(thing);
+    let (mut stdout, mut stderr) =
+        runner.tail_stdout_stderr(thing).await.expect("Bad coder!");
 
-    let send_task = tokio::spawn(async move {
-        while let Some(output) = _conn.recv().await {
-            if socket.send(output).await.is_err() {
-                eprintln!(
-                    "An error occurred whilst sharing data with someone ig"
-                );
-            }
+    let socket_stdout = Arc::new(Mutex::new(socket));
+    let socket_stderr = Arc::clone(&socket_stdout);
+
+    let stdout_handle = tokio::spawn(async move {
+        while let Some(msg) = stdout.recv().await {
+            socket_stdout.lock().await.send(msg).await;
         }
     });
+
+    let stderr_handle = tokio::spawn(async move {
+        while let Some(msg) = stderr.recv().await {
+            socket_stderr.lock().await.send(msg).await;
+        }
+    });
+
+    println!("Waiting on handles to send to the websocket");
+    dbg!(&stdout_handle, &stderr_handle);
+
+    tokio::join!(stdout_handle, stderr_handle);
 }
 
 pub struct Thing {
-    host: String,
-    identifier: String,
-    filetype: FileType,
+    pub host: String,
+    pub identifier: String,
+    pub filetype: FileType,
 }
 
 fn process_message(msg: Message) {
@@ -179,6 +190,9 @@ fn process_message(msg: Message) {
         }
         Message::Binary(d) => {
             println!(">>> sent {} bytes: {d:?}", d.len());
+        }
+        Message::Text(d) => {
+            println!("Yay!");
         }
         _ => {
             panic!("Unexpected message type received");
