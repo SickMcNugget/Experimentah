@@ -1,7 +1,7 @@
 //! Functionality for queueing and running experiments.
 
 use crate::parse::{
-    Experiment, ExperimentRuns, Exporter, Host, RemoteExecution,
+    Experiment, ExperimentRuns, Exporter, FileType, Host, RemoteExecution,
 };
 use crate::{
     command, file_to_deps_path, time_since_epoch, variation_dir_parts,
@@ -21,13 +21,17 @@ const DEFAULT_POLL_SLEEP: Duration = Duration::from_millis(250);
 
 static KILL_EXPORTERS: AtomicBool = AtomicBool::new(false);
 
+use axum::extract::ws::{Message, Utf8Bytes};
 use log::{debug, error, info};
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Mutex;
+use tokio::io::AsyncReadExt;
+use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
 
 use crate::command::{ExecutionResult, ExecutionType, ShellCommand, SpawnType};
@@ -190,27 +194,113 @@ impl From<openssh::Error> for Error {
 }
 
 /// The [`ExperimentRunner`] needs a queue for receiving and running experiments.
-/// This type contains that queue, which is within a mutex for internal mutability.
-pub type ExperimentQueue = Mutex<VecDeque<ExperimentRuns>>;
+pub type ExperimentQueue = VecDeque<ExperimentRuns>;
 
 /// An [`ExperimentRunner`] provides the main functionality of Experimentah. It has a queue along
 /// with multiple metrics for inspecting the current state of the controller.
 pub struct ExperimentRunner {
-    /// When an experiment is running, this contains the name of the experiment
-    pub current_experiment: Mutex<Option<String>>,
-    /// When an experiment is running, this contains the total number of runs that the experiment
-    /// will be repeated for.
-    pub current_runs: AtomicU16,
-    /// When an experiment is running, this contains the current run number that the experiment is
-    /// up to.
-    pub current_run: AtomicU16,
-    /// The queue containing experiments sent in from clients.
-    pub experiment_queue: ExperimentQueue,
+    /// Contains variables that relevant only to the current experiment being run.
+    /// These variables need to accessible from outside the experiment runner (for API
+    /// endpoints to view them).
+    pub current: ExperimentRunnerCurrent,
     /// A configuration which mainly contains important file paths for storing
     /// experiment/controller information.
     pub configuration: ExperimentRunnerConfiguration,
-    /// Contains a list of the running exporters for the current experiment
-    live_exporters: Mutex<ExportersHandles>,
+    /// The queue containing experiments sent in from clients.
+    pub experiment_queue: Mutex<ExperimentQueue>,
+}
+
+/// Stores important information inside an [`ExperimentRunner`] that is expected to clear at the
+/// end of a variation and change during a run.
+#[derive(Default)]
+pub struct ExperimentRunnerCurrent {
+    /// When an experiment is running, this contains the name of the experiment
+    pub experiment_name: Arc<Mutex<Option<String>>>,
+    /// The timestamp (in milliseconds) when the current experiment started running.
+    /// Note that this timestamp is not per-variation.
+    pub ts: Arc<Mutex<u128>>,
+    /// When an experiment is running, this contains the total number of runs that the experiment
+    /// will be repeated for.
+    pub runs: AtomicU16,
+    /// When an experiment is running, this contains the current run number that the experiment is
+    /// up to.
+    pub run: AtomicU16,
+
+    /// Contains a mapping from hosts to Sessions (for running commands) for the current
+    /// experiment.
+    pub sessions: Arc<RwLock<Sessions>>,
+    /// Contains a list of the running exporters for the current experiment.
+    pub exporters: Arc<RwLock<ExportersHandles>>,
+    // pub experiment_directory: Arc<Mutex<PathBuf>>,
+}
+
+impl ExperimentRunnerCurrent {
+    async fn reset(&self) {
+        *self.experiment_name.lock().await = None;
+        *self.ts.lock().await = 0;
+        self.runs.store(0, Ordering::Relaxed);
+        self.run.store(0, Ordering::Relaxed);
+        self.exporters.write().await.clear();
+        self.sessions.write().await.clear();
+    }
+
+    async fn set_experiment_name(&self, experiment: &Experiment) {
+        *self.experiment_name.lock().await = Some(experiment.name.clone());
+    }
+
+    pub async fn status(&self) -> String {
+        let experiment_name = self.experiment_name.lock().await;
+        let run = self.run.load(Ordering::Relaxed);
+        let runs = self.runs.load(Ordering::Relaxed);
+        let sessions = self.sessions.read().await;
+        let exporters = self.exporters.read().await;
+
+        let experiment_name =
+            if let Some(experiment_name) = experiment_name.as_ref() {
+                experiment_name
+            } else {
+                &"None".to_string()
+            };
+
+        format!("experiment_name: {}, {run}/{runs} runs, {} unique hosts, {} exporters spawned", experiment_name, sessions.len(), exporters.len())
+    }
+
+    pub async fn experiment_directory(
+        &self,
+        experimentation_directory: &Path,
+    ) -> PathBuf {
+        let ts = self.ts.lock().await;
+        assert!(
+            *ts != 0,
+            "This function can't be used until the timestamp has been set"
+        );
+
+        PathBuf::from(format!("{}/{}", experimentation_directory.display(), ts))
+    }
+
+    pub async fn repeat_directory(
+        &self,
+        experimentation_directory: &Path,
+    ) -> PathBuf {
+        let run = self.run.load(Ordering::Relaxed);
+        assert!(run > 0);
+
+        self.experiment_directory(experimentation_directory)
+            .await
+            .join(run.to_string())
+    }
+
+    pub async fn variation_directory(
+        &self,
+        experimentation_directory: &Path,
+    ) -> PathBuf {
+        let experiment_name = self.experiment_name.lock().await;
+        let experiment_name = experiment_name.as_ref().expect("This function should only be called once the experiment name has been set!");
+
+        self.repeat_directory(experimentation_directory)
+            .await
+            .join(experiment_name)
+    }
 }
 
 /// The [`ExperimentRunner`] requires a great deal of configuration options (paths, etc) which it
@@ -265,6 +355,8 @@ impl ExperimentRunnerConfiguration {
         directories
     }
 
+    // TODO(joren): live_dir almost definitely needs to be changed so that it makes use of the
+    // FileType enum. That way we don't have floating magical funny strings around the place.
     fn live_dir(&self, subdir: &str) -> PathBuf {
         self.experimentation_dir.join(&self.live_dir).join(subdir)
     }
@@ -272,17 +364,15 @@ impl ExperimentRunnerConfiguration {
 
 impl Default for ExperimentRunner {
     fn default() -> Self {
+        let current: ExperimentRunnerCurrent = Default::default();
         let configuration: ExperimentRunnerConfiguration = Default::default();
+        let experiment_queue =
+            Mutex::new(VecDeque::with_capacity(configuration.max_experiments));
 
         Self {
-            experiment_queue: Mutex::new(VecDeque::with_capacity(
-                configuration.max_experiments,
-            )),
+            current,
             configuration,
-            current_runs: Default::default(),
-            current_experiment: Default::default(),
-            current_run: Default::default(),
-            live_exporters: Default::default(),
+            experiment_queue,
         }
     }
 }
@@ -290,6 +380,24 @@ impl Default for ExperimentRunner {
 impl ExperimentRunner {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub async fn experiment_directory(&self) -> PathBuf {
+        self.current
+            .experiment_directory(&self.configuration.experimentation_dir)
+            .await
+    }
+
+    pub async fn repeat_directory(&self) -> PathBuf {
+        self.current
+            .repeat_directory(&self.configuration.experimentation_dir)
+            .await
+    }
+
+    pub async fn variation_directory(&self) -> PathBuf {
+        self.current
+            .variation_directory(&self.configuration.experimentation_dir)
+            .await
     }
 
     /// Add a new experiment to the runner
@@ -302,34 +410,14 @@ impl ExperimentRunner {
             let mut queue = self.experiment_queue.lock().await;
             match queue.pop_front() {
                 Some(experiment_runs) => {
-                    self.current_runs
+                    self.current
+                        .runs
                         .store(experiment_runs.0, Ordering::Relaxed);
                     return experiment_runs;
                 }
                 None => tokio::time::sleep(self.configuration.poll_sleep).await,
             }
         }
-    }
-
-    async fn reset_metadata(&self) {
-        self.current_runs.store(0, Ordering::Relaxed);
-        self.current_run.store(0, Ordering::Relaxed);
-        *self.current_experiment.lock().await = None;
-    }
-
-    async fn update_current_experiment(
-        &self,
-        experiment: &Experiment,
-        run: u16,
-    ) {
-        info!(
-            "Running experiment '{}' (repeat {}/{})...",
-            &experiment.name,
-            run,
-            self.current_runs.load(Ordering::Relaxed)
-        );
-        let mut current_experiment = self.current_experiment.lock().await;
-        *current_experiment = Some(experiment.name.clone());
     }
 
     // I really have no idea what I want to do for the ExperimentRunner main loop.
@@ -362,7 +450,8 @@ impl ExperimentRunner {
             let (runs, experiments) = self.wait_for_experiments().await;
 
             // We create the timestamp once for each full experiment
-            let ts = time_since_epoch()?.as_millis();
+            // This also sets the experiment directory (indirectly)
+            *self.current.ts.lock().await = time_since_epoch()?.as_millis();
 
             info!(
                 "Experiment with {} variations received ({} repeats).",
@@ -370,20 +459,11 @@ impl ExperimentRunner {
                 runs
             );
 
-            let hosts = Self::unique_hosts_for_all_experiments(&experiments);
-            let sessions = session::connect_to_hosts(&hosts).await?;
-
-            let experiment_directory = PathBuf::from(format!(
-                "{}/{ts}",
-                self.configuration.experimentation_dir.display()
-            ));
+            // Generate the sessions we need by connecting to hosts
+            self.connect_to_hosts(&experiments).await?;
 
             // Ensure that our 'well-known' directories are present
-            session::make_directories(
-                &sessions,
-                &self.configuration.directories(),
-            )
-            .await?;
+            self.make_configuration_directories().await?;
 
             // TODO(joren): All important files need to be uploaded to the correct
             // directory on all the remote sessions ahead of the actual experiment runs.
@@ -391,62 +471,45 @@ impl ExperimentRunner {
             // /srv/experimentah/<timestamp>/<repeat_no>/ directory, we want all
             // resources for that specific experiment to instead populate the
             // /srv/experimentah/<timestamp>/ directory.
-            let files = Self::unique_files_for_all_experiments(&experiments);
-            session::upload(&sessions, &files, &experiment_directory).await?;
+            self.upload_files_for_experiments(&experiments).await?;
 
             // TODO(joren): For dependencies, the current solution is to upload them normally, and
             // then adjust them afterwards to be in the correct subdirectory. It's definitely dumb
             // to do it this way but it's the path of least resistance at the moment.
-            Self::correct_dependencies(
-                &sessions,
-                &experiments,
-                &experiment_directory,
-            )
-            .await?;
+            self.correct_dependencies(&experiments).await?;
 
             for run in 1..=runs {
-                self.current_run.store(run, Ordering::Relaxed);
-
-                let repeat_directory: &Path =
-                    &experiment_directory.join(run.to_string());
+                self.current.run.store(run, Ordering::Relaxed);
 
                 for experiment in experiments.iter() {
-                    let variation_directory: &Path =
-                        &repeat_directory.join(&experiment.name);
+                    self.current.set_experiment_name(experiment).await;
 
-                    self.update_current_experiment(experiment, run).await;
-                    session::make_directory(&sessions, variation_directory)
-                        .await?;
+                    // Create the variation_directory
+                    self.make_variation_directory().await?;
+
+                    info!(
+                        "Running experiment '{}' (repeat {}/{})...",
+                        &experiment.name,
+                        run,
+                        self.current.runs.load(Ordering::Relaxed)
+                    );
 
                     // Here we symlink our script dependencies within the current repeat directory
-                    Self::symlink_dependencies(
-                        &sessions,
+                    self.symlink_dependencies(
                         &experiment.execute,
                         &experiment.dependencies,
-                        &experiment_directory,
-                        variation_directory,
                     )
                     .await?;
+
                     debug!(
                         "Symlinked dependencies for '{:?}': {:?}",
                         &experiment.execute, &experiment.dependencies
                     );
 
-                    let exporters = Self::start_exporters(
-                        &sessions,
-                        &experiment.exporters,
-                        &self.configuration.live_dir("exporters"),
-                        variation_directory,
-                    )
-                    .await?;
+                    self.start_exporters(&experiment.exporters).await?;
+                    tokio::time::sleep(Duration::from_secs(60)).await;
 
-                    {
-                        let mut live_exporters =
-                            self.live_exporters.lock().await;
-                        *live_exporters = exporters;
-                    }
                     info!("Started exporters");
-                    tokio::time::sleep(Duration::from_secs(5)).await;
 
                     // TODO(joren): We want to make sure that our setup/teardown
                     // is run from the *variation* directory, and not the experiment
@@ -456,56 +519,35 @@ impl ExperimentRunner {
                     //
                     // Therefore this function needs to change it's responsibilities
 
-                    Self::run_remote_executions(
-                        &sessions,
-                        &experiment.setup,
-                        &experiment_directory,
-                        variation_directory,
-                    )
-                    .await?;
+                    self.run_remote_executions(&experiment.setup).await?;
                     info!("Variation setup complete");
 
-                    Self::run_remote_execution(
-                        &sessions,
-                        &experiment.execute,
-                        &experiment_directory,
-                        variation_directory,
-                    )
-                    .await?;
+                    self.run_remote_execution(&experiment.execute).await?;
                     info!("Variation complete");
 
-                    Self::run_remote_executions(
-                        &sessions,
-                        &experiment.teardown,
-                        &experiment_directory,
-                        variation_directory,
-                    )
-                    .await?;
+                    self.run_remote_executions(&experiment.teardown).await?;
                     info!("Variation teardown complete");
 
                     // Time for us to close our exporters
                     {
                         KILL_EXPORTERS.store(true, Ordering::Relaxed);
 
-                        let mut live_exporters =
-                            self.live_exporters.lock().await;
-                        for (_exporter_name, handles) in live_exporters.drain()
-                        {
+                        let mut exporters =
+                            self.current.exporters.write().await;
+                        for (_exporter_name, handles) in exporters.drain() {
                             for handle in handles {
                                 handle.await??;
                             }
                         }
 
-                        assert!(live_exporters.len() == 0);
+                        assert!(exporters.len() == 0);
                         KILL_EXPORTERS.store(false, Ordering::Relaxed);
                     }
                     info!("Stopped all exporters for variation");
 
-                    Self::unlink_dependencies(
-                        &sessions,
+                    self.unlink_dependencies(
                         &experiment.execute,
                         &experiment.dependencies,
-                        variation_directory,
                     )
                     .await?;
                     debug!("Unliked dependencies for variation");
@@ -515,26 +557,25 @@ impl ExperimentRunner {
                         .storage_dir
                         .join(&self.configuration.results_dir);
 
-                    Self::collect_results(
-                        &sessions,
-                        variation_directory,
-                        result_directory,
-                    )
-                    .await?;
+                    self.collect_results(result_directory).await?;
                     info!("Collected results for variation");
                 }
             }
-            info!("Finished experiments");
+            // We want to make sure there is no dangling data.
+            self.current.reset().await;
 
-            self.reset_metadata().await;
+            info!("Finished experiments");
         }
     }
 
     /// Since [`Sessions`] are just a mapping of host addresses to SSH sessions, this functions
     /// allows us to filter down a large mapping of [`Sessions`] to those that are important to our
     /// current scope.
-    fn filter_sessions(sessions: &Sessions, addresses: &[String]) -> Sessions {
-        sessions
+    async fn filter_sessions(&self, addresses: &[String]) -> Sessions {
+        self.current
+            .sessions
+            .read()
+            .await
             .iter()
             .filter(|(key, _)| addresses.contains(key))
             .map(|(key, value)| (key.clone(), value.clone()))
@@ -544,47 +585,27 @@ impl ExperimentRunner {
     /// This is the same as the [`filter_sessions`] function, except it takes advantage of the fact
     /// that many structs in Experimentah contain a list of [`Host`]s that we can filter on. Just a
     /// bit of syntactic sugar.
-    fn filter_host_sessions(sessions: &Sessions, hosts: &[Host]) -> Sessions {
+    async fn filter_host_sessions(&self, hosts: &[Host]) -> Sessions {
         let addresses: Vec<String> =
             hosts.iter().map(|host| &host.address).cloned().collect();
 
-        Self::filter_sessions(sessions, &addresses)
-    }
-
-    /// Retrieves all the unique hosts used across a list of experiments.
-    /// This is useful for performing pre-run and post-run actions on these
-    /// hosts that are necessary for experimentah to function correctly.
-    /// These hosts should be filtered as required by each individual experiment variation.
-    fn unique_hosts_for_all_experiments(
-        experiments: &[Experiment],
-    ) -> Vec<&String> {
-        let mut hosts: Vec<&String> = experiments
-            .iter()
-            .flat_map(|experiment| experiment.hosts())
-            .collect();
-
-        hosts.sort();
-        hosts.dedup();
-        hosts
+        self.filter_sessions(&addresses).await
     }
 
     // TODO(joren): This function shouldn't even exist.
     // We should make sure that we upload our dependencies into the correct directories from the
     // beginning of each experiment. This workaround doesn't make much sense.
     async fn correct_dependencies(
-        sessions: &Sessions,
+        &self,
         experiments: &[Experiment],
-        experiment_directory: &Path,
+        // experiment_directory: &Path,
     ) -> Result<()> {
+        let sessions = &*self.current.sessions.read().await;
+
         for experiment in experiments.iter() {
             let execute = &experiment.execute;
-            // let fname = execute
-            //     .scripts
-            //     .first()
-            //     .unwrap()
-            //     .file_name()
-            //     .unwrap()
-            //     .to_string_lossy();
+            let experiment_directory = self.experiment_directory().await;
+
             let execute_directory = experiment_directory.join(format!(
                 "{}-deps",
                 execute
@@ -613,7 +634,7 @@ impl ExperimentRunner {
                     .to_string(),
             );
             shell_command.args(&args);
-            shell_command.working_directory(experiment_directory);
+            shell_command.working_directory(&*experiment_directory);
 
             command::run_command(
                 sessions,
@@ -625,32 +646,15 @@ impl ExperimentRunner {
         Ok(())
     }
 
-    /// Loops through a slice of experiments and returns
-    /// unique filepaths for that slice.
-    fn unique_files_for_all_experiments(
-        experiments: &[Experiment],
-    ) -> Vec<&Path> {
-        let mut files: Vec<&Path> = experiments
-            .iter()
-            .flat_map(|experiment| experiment.files())
-            .collect();
-
-        files.sort();
-        files.dedup();
-        files
-    }
-
-    async fn setup_exporters(
-        sessions: &Sessions,
-        exporters: &[Exporter],
-        variation_directory: &Path,
-    ) -> Result<()> {
+    async fn setup_exporters(&self, exporters: &[Exporter]) -> Result<()> {
         let mut futures: Vec<JoinHandle<Result<()>>> = Vec::new();
+
+        let variation_directory = self.variation_directory().await;
 
         let exporters_clone = exporters.to_vec();
         for exporter in exporters_clone.into_iter() {
             let exporter_sessions =
-                Self::filter_host_sessions(sessions, &exporter.hosts);
+                self.filter_host_sessions(&exporter.hosts).await;
 
             let exporter_clone = exporter.clone();
             let variation_directory_clone = variation_directory.to_path_buf();
@@ -688,24 +692,22 @@ impl ExperimentRunner {
     /// Starts long-running exporters, which are expected to collect
     /// system-level metrics whilst an experiment is running.
     /// Think tools like 'sar' or 'ipmitool'
-    async fn start_exporters(
-        sessions: &Sessions,
-        exporters: &[Exporter],
-        exporter_dir: &Path,
-        variation_directory: &Path,
-    ) -> Result<ExportersHandles> {
+    ///
+    async fn start_exporters(&self, exporters: &[Exporter]) -> Result<()> {
         let mut exporters_handles = ExportersHandles::new();
+
+        let variation_directory = self.variation_directory().await;
 
         // We now perform exporter setup in parallel, nice!
         // NOTE: each step of the setup for each exporter is still serial, as intended.
-        Self::setup_exporters(sessions, exporters, variation_directory).await?;
+        self.setup_exporters(exporters).await?;
 
         for exporter in exporters.iter() {
             let exporter_sessions =
-                Self::filter_host_sessions(sessions, &exporter.hosts);
+                self.filter_host_sessions(&exporter.hosts).await;
 
             let mut exporter_files = exporter.shell_files();
-            exporter_files.set_base(exporter_dir);
+            exporter_files.set_base(self.configuration.live_dir("exporter"));
 
             let parts = shlex::split(&exporter.command).ok_or_else(|| {
                 Error::from(format!(
@@ -715,7 +717,7 @@ impl ExperimentRunner {
             })?;
             let mut shell_command = ShellCommand::from_command_args(&parts);
             shell_command
-                .working_directory(variation_directory)
+                .working_directory(&variation_directory)
                 .stdout_file(&exporter_files.stdout)
                 .stderr_file(&exporter_files.stderr)
                 .pid_file(&exporter_files.pid)
@@ -783,7 +785,9 @@ impl ExperimentRunner {
             exporters_handles.insert(exporter.name.clone(), handles);
         }
 
-        Ok(exporters_handles)
+        *self.current.exporters.write().await = exporters_handles;
+
+        Ok(())
     }
 
     //TODO(joren): We need remote commands to write their outputs to a file somewhere.
@@ -791,31 +795,25 @@ impl ExperimentRunner {
     //It's important to remember that we want to avoid streaming as much as possible
     //unless the client specifically requests it for debug purposes.
     async fn run_remote_executions(
-        sessions: &Sessions,
+        &self,
         remote_executions: &[RemoteExecution],
-        experiment_directory: &Path,
-        variation_directory: &Path,
     ) -> Result<()> {
         for remote_execution in remote_executions.iter() {
-            Self::run_remote_execution(
-                sessions,
-                remote_execution,
-                experiment_directory,
-                variation_directory,
-            )
-            .await?;
+            self.run_remote_execution(remote_execution).await?;
         }
         Ok(())
     }
 
     async fn run_remote_execution(
-        sessions: &Sessions,
+        &self,
         remote_execution: &RemoteExecution,
-        experiment_directory: &Path,
-        variation_directory: &Path,
     ) -> Result<()> {
         let setup_sessions =
-            Self::filter_host_sessions(sessions, &remote_execution.hosts);
+            self.filter_host_sessions(&remote_execution.hosts).await;
+
+        let experiment_directory = self.experiment_directory().await;
+        let variation_directory = self.variation_directory().await;
+
         for remote_script in remote_execution.remote_scripts().iter() {
             // This assertion only checks locally.
             // Scripts should exist on the remote at this point.
@@ -825,7 +823,7 @@ impl ExperimentRunner {
             session::run_script_at(
                 &setup_sessions,
                 remote_script,
-                variation_directory,
+                &variation_directory,
             )
             .await?;
             // TODO(joren): Handle error case
@@ -837,18 +835,54 @@ impl ExperimentRunner {
         Ok(())
     }
 
+    async fn make_configuration_directories(&self) -> session::Result<()> {
+        session::make_directories(
+            &*self.current.sessions.read().await,
+            &self.configuration.directories(),
+        )
+        .await
+    }
+    async fn make_variation_directory(&self) -> session::Result<()> {
+        session::make_directory(
+            &*self.current.sessions.read().await,
+            &self.variation_directory().await,
+        )
+        .await
+    }
+
+    async fn upload_files_for_experiments(
+        &self,
+        experiments: &[Experiment],
+    ) -> session::Result<()> {
+        let files = unique_files_for_experiments(experiments);
+        session::upload(
+            &*self.current.sessions.read().await,
+            &files,
+            &self.experiment_directory().await,
+        )
+        .await
+    }
+
+    async fn connect_to_hosts(
+        &self,
+        experiments: &[Experiment],
+    ) -> session::Result<()> {
+        let hosts = unique_hosts_for_experiments(experiments);
+        let sessions = session::connect_to_hosts(&hosts).await?;
+        *self.current.sessions.write().await = sessions;
+        Ok(())
+    }
+
     async fn symlink_dependencies(
-        sessions: &Sessions,
+        &self,
         remote_execution: &RemoteExecution,
         dependencies: &[PathBuf],
-        experiment_directory: &Path,
-        variation_directory: &Path,
     ) -> Result<Vec<ExecutionResult>> {
         let filter_sessions =
-            Self::filter_host_sessions(sessions, &remote_execution.hosts);
+            self.filter_host_sessions(&remote_execution.hosts).await;
 
         let deps_path = file_to_deps_path(
-            experiment_directory,
+            &self.experiment_directory().await,
             remote_execution.scripts.first().unwrap(),
         );
 
@@ -856,7 +890,10 @@ impl ExperimentRunner {
             "ln".to_string(),
             "-s".to_string(),
             "-t".to_string(),
-            variation_directory.to_string_lossy().to_string(),
+            self.variation_directory()
+                .await
+                .to_string_lossy()
+                .to_string(),
         ]
         .into_iter()
         .chain(dependencies.iter().map(|dep| {
@@ -878,13 +915,14 @@ impl ExperimentRunner {
     }
 
     async fn unlink_dependencies(
-        sessions: &Sessions,
+        &self,
         remote_execution: &RemoteExecution,
         dependencies: &[PathBuf],
-        variation_directory: &Path,
     ) -> Result<()> {
         let filter_sessions =
-            Self::filter_host_sessions(sessions, &remote_execution.hosts);
+            self.filter_host_sessions(&remote_execution.hosts).await;
+
+        let variation_directory = self.variation_directory().await;
 
         let args: Vec<String> = dependencies
             .iter()
@@ -908,13 +946,13 @@ impl ExperimentRunner {
         // .map_err(Error::from)
     }
 
-    async fn collect_results(
-        sessions: &Sessions,
-        variation_directory: &Path,
-        results_dir: &Path,
-    ) -> Result<()> {
+    async fn collect_results(&self, results_dir: &Path) -> Result<()> {
+        let variation_directory = self.variation_directory().await;
+
+        //TODO(joren): We can just store the timestamp in the ExperimentRunnerCurrent struct so we
+        //don't even need this function anymore.
         let (experiment_name, run, ts) =
-            variation_dir_parts(variation_directory);
+            variation_dir_parts(&variation_directory);
 
         info!(
             "Collecting results for experiment '{}' (repeat {})",
@@ -931,19 +969,223 @@ impl ExperimentRunner {
             ))
         })?;
 
-        session::download(sessions, &[variation_directory], &local_results_dir)
-            .await?;
+        session::download(
+            &*self.current.sessions.read().await,
+            &[variation_directory],
+            local_results_dir,
+        )
+        .await?;
 
         Ok(())
     }
 
-    pub fn follow(&self, thing: crate::routes::Thing) {
-        todo!()
+    pub async fn tail_stdout_stderr(
+        &self,
+        thing: crate::routes::Thing,
+    ) -> Result<(UnboundedReceiver<Message>, UnboundedReceiver<Message>)> {
+        let sessions = self.filter_sessions(&[thing.host]).await;
+
+        let stdout = format!("{}.stdout", thing.identifier);
+        let stderr = format!("{}.stderr", thing.identifier);
+
+        let mut stdout_shell_command = ShellCommand::from_command("tail");
+        stdout_shell_command
+            .args(&["-c".to_string(), "+0".to_string(), stdout])
+            .working_directory(
+                self.configuration.live_dir(&thing.filetype.to_string()),
+            );
+
+        let mut stderr_shell_command = ShellCommand::from_command("tail");
+        stderr_shell_command
+            .args(&["-c".to_string(), "+0".to_string(), stderr])
+            .working_directory(
+                self.configuration.live_dir(&thing.filetype.to_string()),
+            );
+
+        let stdout_handle = command::run_command(
+            &sessions,
+            stdout_shell_command,
+            ExecutionType::Spawn,
+        )
+        .await?;
+
+        let stdout_handle = stdout_handle
+            .into_iter()
+            .map(|stdout_thread| {
+                if let ExecutionResult::Spawn(child) = stdout_thread {
+                    child
+                } else {
+                    // Since we specified ExecutionType::Spawn, we should definitely be getting
+                    // ExecutionResult::Spawn back from this function
+                    panic!();
+                }
+            })
+            .collect::<Vec<SpawnType>>()
+            .pop()
+            .expect("We should have had a process at this point");
+
+        let (stdout_sender, stdout_recv) =
+            tokio::sync::mpsc::unbounded_channel::<Message>();
+
+        match stdout_handle {
+            SpawnType::SSH(mut child) => tokio::spawn(async move {
+                let mut stdout = child.stdout().take().unwrap();
+                let mut buf = [0; 100];
+                loop {
+                    let n = stdout.read(&mut buf).await?;
+                    if n == 0 {
+                        return Ok::<(), Error>(());
+                    }
+                    let message =
+                        Message::text(String::from_utf8(buf.to_vec()).unwrap());
+                    stdout_sender.send(message);
+                }
+            }),
+            SpawnType::Tokio(child) => tokio::spawn(async move {
+                let mut stdout = child.stdout.unwrap();
+                let mut buf = [0; 100];
+                loop {
+                    let n = stdout.read(&mut buf).await?;
+                    if n == 0 {
+                        return Ok(());
+                    }
+                    let message =
+                        Message::text(String::from_utf8(buf.to_vec()).unwrap());
+                    stdout_sender.send(message);
+                }
+            }),
+        };
+
+        let stderr_handle = command::run_command(
+            &sessions,
+            stderr_shell_command,
+            ExecutionType::Spawn,
+        )
+        .await?;
+
+        let stderr_handle = stderr_handle
+            .into_iter()
+            .map(|stderr_thread| {
+                if let ExecutionResult::Spawn(child) = stderr_thread {
+                    child
+                } else {
+                    // Since we specified ExecutionType::Spawn, we should definitely be getting
+                    // ExecutionResult::Spawn back from this function
+                    panic!();
+                }
+            })
+            .collect::<Vec<SpawnType>>()
+            .pop()
+            .expect("We should have had a process at this point");
+
+        let (stderr_sender, stderr_recv) =
+            tokio::sync::mpsc::unbounded_channel::<Message>();
+
+        match stderr_handle {
+            SpawnType::SSH(mut child) => tokio::spawn(async move {
+                // Yes, the stderr is returned from stdout
+                let mut stderr = child.stdout().take().unwrap();
+                let mut buf = [0; 100];
+                loop {
+                    let n = stderr.read(&mut buf).await?;
+                    if n == 0 {
+                        return Ok::<(), Error>(());
+                    }
+                    let message =
+                        Message::text(String::from_utf8(buf.to_vec()).unwrap());
+                    stderr_sender.send(message);
+                }
+            }),
+            SpawnType::Tokio(child) => tokio::spawn(async move {
+                let mut stderr = child.stdout.unwrap();
+                let mut buf = [0; 100];
+                loop {
+                    let n = stderr.read(&mut buf).await?;
+                    if n == 0 {
+                        return Ok(());
+                    }
+                    let message =
+                        Message::text(String::from_utf8(buf.to_vec()).unwrap());
+                    stderr_sender.send(message);
+                }
+            }),
+        };
+
+        Ok((stdout_recv, stderr_recv))
     }
 }
 
-// #[cfg(test)]
-// mod tests {
-//     #[test]
-//     fn enqueue_experiment() {}
-// }
+/// Loops through a slice of experiments and returns
+/// unique filepaths for that slice.
+fn unique_files_for_experiments(experiments: &[Experiment]) -> Vec<&Path> {
+    let mut files: Vec<&Path> = experiments
+        .iter()
+        .flat_map(|experiment| experiment.files())
+        .collect();
+
+    files.sort();
+    files.dedup();
+    files
+}
+
+/// Retrieves all the unique hosts used across a list of experiments.
+/// This is useful for performing pre-run and post-run actions on these
+/// hosts that are necessary for experimentah to function correctly.
+/// These hosts should be filtered as required by each individual experiment variation.
+fn unique_hosts_for_experiments(experiments: &[Experiment]) -> Vec<&String> {
+    let mut hosts: Vec<&String> = experiments
+        .iter()
+        .flat_map(|experiment| experiment.hosts())
+        .collect();
+
+    hosts.sort();
+    hosts.dedup();
+    hosts
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn runner() -> ExperimentRunner {
+        let runner = ExperimentRunner::new();
+
+        let ts = time_since_epoch()
+            .expect("We shouldn't be failing to get time")
+            .as_millis();
+        let experiment_name = String::from("test_experiment_name");
+        let run: u16 = 1;
+        let runs: u16 = 10;
+        let sessions = Sessions::default();
+        let exporters = ExportersHandles::default();
+
+        *runner.current.ts.lock().await = ts;
+        *runner.current.experiment_name.lock().await = Some(experiment_name);
+        runner.current.run.store(run, Ordering::Relaxed);
+        runner.current.runs.store(runs, Ordering::Relaxed);
+        *runner.current.sessions.write().await = sessions;
+        *runner.current.exporters.write().await = exporters;
+
+        runner
+    }
+
+    #[tokio::test]
+    async fn runner_reset() {
+        let runner = runner().await;
+        runner.current.reset().await;
+
+        let ts = runner.current.ts.lock().await;
+        let experiment_name = runner.current.experiment_name.lock().await;
+        let run: u16 = runner.current.run.load(Ordering::Relaxed);
+        let runs: u16 = runner.current.runs.load(Ordering::Relaxed);
+        let sessions = runner.current.sessions.read().await;
+        let exporters = runner.current.exporters.read().await;
+
+        assert_eq!(*ts, 0);
+        assert_eq!(*experiment_name, None);
+        assert_eq!(run, 0);
+        assert_eq!(runs, 0);
+        assert!(sessions.is_empty());
+        assert!(exporters.is_empty());
+    }
+}
