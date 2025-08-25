@@ -880,7 +880,7 @@ impl RemoteExecution {
 }
 
 /// Describes the significance of a file for remote use.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, strum::EnumIter)]
 pub enum FileType {
     /// Setup files are used during the setup stage of an experiment.
     Setup,

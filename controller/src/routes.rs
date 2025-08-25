@@ -5,7 +5,7 @@ use std::{
 use axum::{
     body::Bytes,
     extract::{
-        ws::{Message, WebSocket},
+        ws::{Message, Utf8Bytes, WebSocket},
         Multipart, State, WebSocketUpgrade,
     },
     response::Response,
@@ -144,28 +144,50 @@ async fn handle_socket(mut socket: WebSocket, runner: RunState) {
 
     // We need to setup a *follow* for the file requested, that allows us to tune into the
     // stdout/stderr of the file, which we can stream as required.
-    let (mut stdout, mut stderr) =
-        runner.tail_stdout_stderr(thing).await.expect("Bad coder!");
+    let (mut stdout, mut stderr) = match runner.tail_stdout_stderr(thing).await
+    {
+        Ok((stdout, stderr)) => (stdout, stderr),
+        Err(e) => match e {
+            crate::run::Error::FollowError(error) => {
+                eprintln!("{error}");
+                socket.send(Message::Close(None)).await.unwrap();
+                return;
+            }
+            _ => panic!("{e}"),
+        },
+    };
+
+    // Splitting seems to kill our socket.
 
     let socket_stdout = Arc::new(Mutex::new(socket));
     let socket_stderr = Arc::clone(&socket_stdout);
 
     let stdout_handle = tokio::spawn(async move {
         while let Some(msg) = stdout.recv().await {
-            socket_stdout.lock().await.send(msg).await;
+            match socket_stdout.lock().await.send(msg).await {
+                Ok(()) => {}
+                Err(_e) => break,
+            }
         }
     });
 
     let stderr_handle = tokio::spawn(async move {
         while let Some(msg) = stderr.recv().await {
-            socket_stderr.lock().await.send(msg).await;
+            match socket_stderr.lock().await.send(msg).await {
+                Ok(()) => {}
+                Err(_e) => break,
+            }
         }
     });
 
     println!("Waiting on handles to send to the websocket");
-    dbg!(&stdout_handle, &stderr_handle);
+    // dbg!(&stdout_handle, &stderr_handle);
 
-    tokio::join!(stdout_handle, stderr_handle);
+    let (ret1, ret2) = tokio::join!(stdout_handle, stderr_handle);
+    ret1.unwrap();
+    ret2.unwrap();
+    println!("Handles joined!");
+    // tokio::join!(stdout_handle);
 }
 
 pub struct Thing {
@@ -192,7 +214,7 @@ fn process_message(msg: Message) {
             println!(">>> sent {} bytes: {d:?}", d.len());
         }
         Message::Text(d) => {
-            println!("Yay!");
+            println!("Yay!: {d}");
         }
         _ => {
             panic!("Unexpected message type received");
