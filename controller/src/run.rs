@@ -6,7 +6,7 @@ use crate::parse::{
 use crate::{
     command, file_to_deps_path, time_since_epoch, variation_dir_parts,
     DEFAULT_LIVE_DIR, DEFAULT_REMOTE_DIR, DEFAULT_RESULTS_DIR,
-    DEFAULT_STORAGE_DIR, SUBDIRECTORIES,
+    DEFAULT_STORAGE_DIR,
 };
 
 /// Internally I've just set the queue to begin with a capacity of 32 potential [`ExperimentRuns`].
@@ -29,6 +29,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use strum::IntoEnumIterator;
 use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::{Mutex, RwLock};
@@ -79,6 +80,7 @@ pub enum Error {
     Generic(String),
     JoinError(String, tokio::task::JoinError),
     OpenSSHError(String, openssh::Error),
+    FollowError(String),
 }
 
 impl std::fmt::Display for Error {
@@ -102,6 +104,9 @@ impl std::fmt::Display for Error {
             Error::Generic(ref message) => {
                 write!(f, "{message}")
             }
+            Error::FollowError(ref message) => {
+                write!(f, "{message}")
+            }
         }
     }
 }
@@ -115,6 +120,7 @@ impl std::error::Error for Error {
             Error::JoinError(.., ref source) => Some(source),
             Error::OpenSSHError(.., ref source) => Some(source),
             Error::Generic(..) => None,
+            Error::FollowError(..) => None,
         }
     }
 }
@@ -343,22 +349,15 @@ impl Default for ExperimentRunnerConfiguration {
 impl ExperimentRunnerConfiguration {
     /// Returns directories that need to be created for experiments to run correctly
     fn directories(&self) -> Vec<PathBuf> {
-        let mut directories = Vec::new();
-
-        for directory in SUBDIRECTORIES {
-            directories.push(
-                self.experimentation_dir
-                    .join(&self.live_dir)
-                    .join(directory),
-            );
-        }
-        directories
+        FileType::iter().map(|ft| self.live_dir(&ft)).collect()
     }
 
     // TODO(joren): live_dir almost definitely needs to be changed so that it makes use of the
     // FileType enum. That way we don't have floating magical funny strings around the place.
-    fn live_dir(&self, subdir: &str) -> PathBuf {
-        self.experimentation_dir.join(&self.live_dir).join(subdir)
+    fn live_dir(&self, filetype: &FileType) -> PathBuf {
+        self.experimentation_dir
+            .join(&self.live_dir)
+            .join(filetype.to_string())
     }
 }
 
@@ -707,7 +706,8 @@ impl ExperimentRunner {
                 self.filter_host_sessions(&exporter.hosts).await;
 
             let mut exporter_files = exporter.shell_files();
-            exporter_files.set_base(self.configuration.live_dir("exporter"));
+            exporter_files
+                .set_base(self.configuration.live_dir(&FileType::Exporter));
 
             let parts = shlex::split(&exporter.command).ok_or_else(|| {
                 Error::from(format!(
@@ -985,22 +985,52 @@ impl ExperimentRunner {
     ) -> Result<(UnboundedReceiver<Message>, UnboundedReceiver<Message>)> {
         let sessions = self.filter_sessions(&[thing.host]).await;
 
+        // We need to make sure that our exporter/setup/teardown/execute is running
+        match thing.filetype {
+            FileType::Exporter => {
+                // dbg!(self
+                //     .current
+                //     .exporters
+                //     .read()
+                //     .await
+                //     .get(&thing.identifier));
+
+                match self.current.exporters.read().await.get(&thing.identifier)
+                {
+                    Some(handle) => dbg!(handle),
+                    None => {
+                        return Err(Error::FollowError(format!(
+                            "The exporter {} is not running",
+                            thing.identifier
+                        )))
+                    }
+                };
+            }
+            _ => {}
+        }
+
         let stdout = format!("{}.stdout", thing.identifier);
         let stderr = format!("{}.stderr", thing.identifier);
 
         let mut stdout_shell_command = ShellCommand::from_command("tail");
         stdout_shell_command
-            .args(&["-c".to_string(), "+0".to_string(), stdout])
-            .working_directory(
-                self.configuration.live_dir(&thing.filetype.to_string()),
-            );
+            .args(&[
+                "-c".to_string(),
+                "+0".to_string(),
+                "-f".to_string(),
+                stdout,
+            ])
+            .working_directory(self.configuration.live_dir(&thing.filetype));
 
         let mut stderr_shell_command = ShellCommand::from_command("tail");
         stderr_shell_command
-            .args(&["-c".to_string(), "+0".to_string(), stderr])
-            .working_directory(
-                self.configuration.live_dir(&thing.filetype.to_string()),
-            );
+            .args(&[
+                "-c".to_string(),
+                "+0".to_string(),
+                "-f".to_string(),
+                stderr,
+            ])
+            .working_directory(self.configuration.live_dir(&thing.filetype));
 
         let stdout_handle = command::run_command(
             &sessions,
@@ -1038,7 +1068,10 @@ impl ExperimentRunner {
                     }
                     let message =
                         Message::text(String::from_utf8(buf.to_vec()).unwrap());
-                    stdout_sender.send(message);
+                    match stdout_sender.send(message) {
+                        Ok(()) => {}
+                        Err(_e) => return Ok::<(), Error>(()),
+                    }
                 }
             }),
             SpawnType::Tokio(child) => tokio::spawn(async move {
@@ -1051,7 +1084,10 @@ impl ExperimentRunner {
                     }
                     let message =
                         Message::text(String::from_utf8(buf.to_vec()).unwrap());
-                    stdout_sender.send(message);
+                    match stdout_sender.send(message) {
+                        Ok(()) => {}
+                        Err(_e) => return Ok::<(), Error>(()),
+                    }
                 }
             }),
         };
@@ -1093,7 +1129,10 @@ impl ExperimentRunner {
                     }
                     let message =
                         Message::text(String::from_utf8(buf.to_vec()).unwrap());
-                    stderr_sender.send(message);
+                    match stderr_sender.send(message) {
+                        Ok(()) => {}
+                        Err(_e) => return Ok::<(), Error>(()),
+                    }
                 }
             }),
             SpawnType::Tokio(child) => tokio::spawn(async move {
@@ -1106,7 +1145,10 @@ impl ExperimentRunner {
                     }
                     let message =
                         Message::text(String::from_utf8(buf.to_vec()).unwrap());
-                    stderr_sender.send(message);
+                    match stderr_sender.send(message) {
+                        Ok(()) => {}
+                        Err(_e) => return Ok::<(), Error>(()),
+                    }
                 }
             }),
         };

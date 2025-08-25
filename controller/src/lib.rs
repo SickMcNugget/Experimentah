@@ -37,10 +37,6 @@ pub mod session;
 /// - storage/DATABASE
 pub const DEFAULT_STORAGE_DIR: &str = "storage";
 
-/// A list of important subdirectories for remote/local hosts.
-pub const SUBDIRECTORIES: [&str; 4] =
-    ["setup", "execute", "teardown", "exporters"];
-
 /// We want all our remote operations to occur in a well-known directory, so that we can avoid.
 ///
 /// Overwriting anything that's pre-existing on the target system.
