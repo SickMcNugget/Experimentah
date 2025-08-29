@@ -1,179 +1,50 @@
-// Written by Joren Regan
-// Date: 2025-06-13
-//
-// This is the client-side portion of the Experimentah system.
-// Two threads are at play (once validation has succeeded and the system is ready):
-// 1. The experiment running thread. Tells the runner what to do and waits until it's done.
-// 2. The heartbeat thread. Ensures that endpoints continue to be reachable. If they aren't,
-// after a time delay, notifies the main thread which then:
-//  a. Tries to shut down the runner, collecting whatever results may exist.
-//  b. Tries to upload collected results (if the error was with repo node)
-//  c. Dies
+use std::{env, sync::Arc};
 
-use std::env;
-use std::path::PathBuf;
-use std::sync::Arc;
+use axum::{
+    routing::{get, post},
+    Router,
+};
 
-use clap::Parser;
+use controller::{
+    routes::{self, RunState},
+    run::ExperimentRunner,
+};
 
-use controller::parse::{Config, ExperimentConfig};
-use controller::run::ExperimentRunner;
-
-use reqwest::{Client, StatusCode};
-
-use std::time::Duration;
-
-const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(5000);
+#[allow(unused_imports)]
+use log::{debug, error, info, trace, warn};
 
 #[tokio::main]
 async fn main() {
-    let args = Args::parse();
+    let log_level: String = env::var("RUST_LOG").unwrap_or("info".to_string());
+    env::set_var("RUST_LOG", log_level);
+    env_logger::init();
 
-    let timeout = Duration::from_secs(args.timeout);
+    let address = "0.0.0.0";
+    let port = 50000;
+    let url = format!("{address}:{port}");
 
-    let config: Arc<Config> = match Config::from_file(&args.config) {
-        Ok(config) => Arc::new(config),
-        Err(e) => panic!("{e}"),
-    };
+    let listener = tokio::net::TcpListener::bind(&url).await.unwrap();
+    info!("Now serving at http://{}", &url);
 
-    println!(
-        "Successfully parsed and validated config: {:?}",
-        &args.config
-    );
+    let runner = Arc::new(ExperimentRunner::new());
+    let state_runner = runner.clone();
 
-    let experiment_config: Arc<ExperimentConfig> =
-        match ExperimentConfig::from_file(
-            &args.experiment_config,
-            config.as_ref(),
-        ) {
-            Ok(experiment_config) => Arc::new(experiment_config),
-            Err(e) => panic!("{e}"),
-        };
+    let runner_handle = tokio::spawn(async move {
+        runner.start().await;
+    });
 
-    println!(
-        "Successfully parsed and validated experiment config: {:?}",
-        &args.experiment_config
-    );
-
-    println!("Logging to file: {:?}", args.log_file);
-
-    let client = Client::builder()
-        .timeout(timeout)
-        .build()
-        .expect("Somehow an invalid client was built");
-
-    let mut er = ExperimentRunner::new(
-        config.as_ref(),
-        experiment_config.as_ref(),
-        client.clone(),
-    );
-
-    // I think that I want the controller to ensure that runners are available on the hosts they're
-    // meant to be on.
-    // I want the runner to ensure that exporters are working as expected, though, meaning that
-    // an endpoint needs to be added to the runner which allows an exporter to be registered (and
-    // subsequently monitored) by that runner. Exporters will be programs that are run in the
-    // background during the execution of a run. We'll use and advisory lock to make sure that
-    // multiple instances of the exporter program are not created, and that they're properly killed
-    // at the end of a run. I think the expectation at this point is that an exporter should be a
-    // long-running process which outputs it's data to a file. It's the responsibility of the
-    // exporter itself to include timestamp information and do all the heavy lifting regarding
-    // metrics collection.
-    // Think tools like sar, and raritan (my bespoke power usage script).
-
-    // TODO(joren): In the future, it may be better to only prepare runners for the experiment
-    // that's about to be run. For now, I'd like to do everything at the beginning, though.
-    println!("Ensuring all runners are up and reachable");
-    if let Err(e) = er.check_runners().await {
-        panic!("{e}");
-    }
-
-    tokio::spawn(async move { heartbeat_thread(client, config).await });
-
-    let runs = &experiment_config.runs;
-    println!("= Running Experiment {}=", runs);
-
-    for _ in 0..*runs {
-        todo!();
-    }
-
-    println!("\n= Successful Experiments =");
+    let serve_handle = axum::serve(listener, router(state_runner));
+    let (_serve_data, _runner_data) = tokio::join!(serve_handle, runner_handle);
 }
 
-// Runs periodically and determines service connectivity
-async fn heartbeat_thread(client: Client, config: Arc<Config>) {
-    loop {
-        let brain_promise = client
-            .get(format!("{}/status", config.brain_endpoint()))
-            .send();
+// TODO: Add CLAP for argument parsing instead of using an env, as Controller may have to configure
+// via command line args and cannot directly alter the env file on the runner's host.
 
-        let mut runner_promises = Vec::with_capacity(config.runners.len());
-        for runner in config.runner_endpoints() {
-            runner_promises
-                .push(client.get(format!("{}/status", runner)).send());
-        }
-
-        match brain_promise.await {
-            Ok(response) => match response.status() {
-                StatusCode::OK => {}
-                _ => eprintln!(
-                    "Bad status code from brain: {}",
-                    response.status()
-                ),
-            },
-            Err(..) => {
-                eprintln!("Error awaiting brain");
-            }
-        }
-        for runner_promise in runner_promises {
-            match runner_promise.await {
-                Ok(response) => match response.status() {
-                    StatusCode::OK => {}
-                    _ => eprintln!(
-                        "Bad status code from runner: {}",
-                        response.status()
-                    ),
-                },
-                Err(..) => {
-                    eprintln!("Error awaiting runner");
-                }
-            }
-        }
-        tokio::time::sleep(HEARTBEAT_INTERVAL).await;
-    }
-}
-
-fn default_log_file() -> PathBuf {
-    let mut path = env::current_exe().unwrap();
-    path.pop();
-    path.push("log/experimentah.log");
-    path
-}
-
-#[derive(Parser, Debug)]
-#[command(name = "Controller")]
-#[command(version = "0.0.1")]
-#[command(
-    about = "Allows a user to run experiments using defined configs/experiment configs"
-)]
-#[command(long_about = None)]
-struct Args {
-    /// The config file storing global configuration
-    #[arg(value_name = "CONFIG_FILE")]
-    config: PathBuf,
-
-    /// The experiment-specific configuration file
-    #[arg(value_name = "EXPERIMENT_CONFIG_FILE")]
-    experiment_config: PathBuf,
-
-    /// Perform all initial checks without running the experiment
-    #[arg(short, long)]
-    dry_run: bool,
-
-    /// The log file storing controller outputs
-    #[arg(short, long, default_value=default_log_file().into_os_string())]
-    log_file: PathBuf,
-
-    #[arg(short, long, default_value_t = 5)]
-    timeout: u64,
+fn router(run_state: RunState) -> Router {
+    Router::new()
+        .route("/", get(routes::index))
+        .route("/status", get(routes::status))
+        .route("/run", post(routes::run))
+        .route("/upload", post(routes::upload))
+        .with_state(run_state)
 }

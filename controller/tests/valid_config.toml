@@ -1,0 +1,16 @@
+[[hosts]]
+name = "runner1"
+address = "localhost"
+infrastructure = "linux"
+
+[[exporters]]
+name = "test-exporter"
+hosts = ["runner1"]
+command = "sar -o collection.bin"
+setup = ["dnf install -y sysstat", "apt install -y sysstat"]
+kind = "node"
+[[exporters]]
+name = "another-test-exporter"
+hosts = ["runner1"]
+command = "my_collector"
+kind = "node"

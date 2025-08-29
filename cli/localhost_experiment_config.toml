@@ -1,0 +1,38 @@
+name = "localhost-experiment"
+description = "Testing the functionality of the software completely using localhost"
+kind = "localhost-result"
+execute = "./scripts/actual-work.sh"
+arguments = ["Argument 1", "Argument 2"]
+# Optional, not checked if omitted
+# If you need to override on a per-variation basis, omit the top-level definition,
+# and instead add it to the individual variation.
+expected_arguments = 2
+hosts = ["runner1"]
+# Optional, defaults to 1
+runs = 1
+
+[[setup]]
+hosts = ["runner1"]
+scripts = ["./scripts/test-setup.sh"]
+
+#[[variations]]
+# This empty variation will inherit all the top-level fields
+#[[variations]]
+#name = "different args"
+#arguments = ["Argument 1"]
+#expected_arguments = 1
+
+[[variations]]
+name = "with-exporter"
+exporters = ["test-exporter"]
+
+[[variations]]
+name = "other"
+
+#[[variations]]
+#name = "with multiple exporters"
+#exporters = ["test-exporter", "another-test-exporter"]
+
+[[teardown]]
+hosts = ["runner1"]
+scripts = ["./scripts/test-teardown.sh"]

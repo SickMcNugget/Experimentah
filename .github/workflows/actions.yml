@@ -1,0 +1,28 @@
+name: Experimentah
+
+on:
+  push:
+    branches: [ "architecture-update" ]
+  pull_request:
+    branches: [ "architecture-update" ]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Cache target build
+      uses: actions/cache@v4.2.4
+      with:
+        path: |
+          ./target
+        key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+    - name: Build experimentah
+      run: cargo build --verbose
+    - name: Run all experimentah tests
+      run: cargo test --verbose

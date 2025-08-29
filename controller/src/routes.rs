@@ -1,0 +1,160 @@
+use std::{
+    os::unix::fs::PermissionsExt,
+    path::PathBuf,
+    str::FromStr,
+    sync::{atomic::Ordering, Arc},
+};
+
+use axum::{
+    body::Bytes,
+    extract::{Multipart, State},
+    Json,
+};
+use log::info;
+
+use crate::{
+    parse::{self, Config, ExperimentConfig, FileType},
+    run::ExperimentRunner,
+    DEFAULT_STORAGE_DIR,
+};
+
+pub type RunState = Arc<ExperimentRunner>;
+
+/// An endpoint that shows all the other endpoints, with a short description of each
+pub async fn index() -> &'static str {
+    concat!(
+        "`GET /` Gets all available experiments and their status\n",
+        "`GET /status` Retrieves the current status of the runner. This shows if it is still running an experiment.\n",
+        "`POST /run { <execute_request> }` Executes a series of commands from the request\n",
+        "`POST /upload { <files> }` Uploads a list of local files to the controller, storing them in a well-known location",
+    )
+}
+
+/// The main endpoint for Experimentah. In this endpoint, a [`Config`] and an [`ExperimentConfig`]
+/// are received, validated, converted into [`parse::Experiment`]s, and then enqueued inside of the [`crate::run::ExperimentRunner`].
+pub async fn run(
+    State(run_state): State<RunState>,
+    configs: Json<(Config, ExperimentConfig)>,
+) -> Result<(), parse::Error> {
+    info!("Received configs over the wire");
+    let (config, experiment_config) = configs.0;
+
+    config.validate()?;
+    experiment_config.validate(&config)?;
+    experiment_config.validate_files(&run_state.configuration.storage_dir)?;
+    info!("Successfully validated configs");
+
+    let experiments = parse::generate_experiments(
+        &config,
+        &experiment_config,
+        &run_state.configuration.storage_dir,
+    )?;
+    info!("Generated experiments from configs");
+
+    let runner = &run_state;
+    runner.enqueue(experiments).await;
+    info!("Enqueued experiments into the runner");
+
+    Ok(())
+}
+
+/// Retrieves the current state of the [`crate::run::ExperimentRunner`].
+pub async fn status(State(run_state): State<RunState>) -> String {
+    let runner = &run_state;
+    let current_experiment = runner.current_experiment.lock().await;
+    let current_run = runner.current_run.load(Ordering::Relaxed);
+    let current_runs = runner.current_runs.load(Ordering::Relaxed);
+
+    format!("Current Experiment: {current_experiment:?}, Current run: {current_run:?}/{current_runs:?}")
+}
+
+pub async fn upload(mut multipart: Multipart) -> Result<(), String> {
+    let mut path: PathBuf = PathBuf::from(DEFAULT_STORAGE_DIR);
+    let mut file: Option<Bytes> = None;
+
+    while let Some(field) = multipart.next_field().await.unwrap() {
+        let name = field.name().expect("No name sent as part of multipart");
+        match name {
+            "type" => {
+                let ft =
+                    FileType::from_str(field.text().await.unwrap().as_str())
+                        .unwrap();
+                path.push(ft.to_string());
+            }
+            "file" => {
+                path.push(field.file_name().unwrap());
+                file = Some(field.bytes().await.unwrap());
+            }
+            _ => {
+                panic!("Invalid multipart fields received");
+            }
+        }
+    }
+
+    let dir = path.parent().expect(
+        "Expected a path containing directories and ending with a file",
+    );
+    std::fs::create_dir_all(dir).expect("Failed to create directory");
+    std::fs::write(&path, file.unwrap()).expect("Failed to write file to disk");
+
+    // We want to make sure our files are executable if it's a shell script
+    // TODO(joren): I've just bodged it for now, but surely there is a smarter way to determine
+    // whether something needs to be executable. I'm not against a LUT, though.
+    if let Some(extension) = path.extension() {
+        if extension == "sh" {
+            let mut perms = std::fs::metadata(&path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&path, perms).unwrap();
+        }
+    }
+    info!("Saved file {:?} to {:?}", path.file_name().unwrap(), path);
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::routes::index;
+
+    #[tokio::test]
+    async fn route_index() {
+        let ret = index().await;
+        let search_strs = vec!["GET /", "GET /status", "POST /run"];
+        for str in search_strs {
+            assert!(ret.contains(str));
+        }
+    }
+    //
+    // #[tokio::test]
+    // async fn post_run_endpoint() {
+    //     // TODO(joren): Move these kinds of integration tests into the tests/ folder
+    //     let test = PathBuf::from("./test");
+    //     let config_data =
+    //         Config::from_file(&test.join("valid_config.toml")).unwrap();
+    //     let experiment_config_data = ExperimentConfig::from_file(
+    //         &test.join("valid_experiment_config.toml"),
+    //     )
+    //     .unwrap();
+    //
+    //     let request = Request::builder()
+    //         .method("POST")
+    //         .uri("/run")
+    //         .header("Content-Type", "application/json")
+    //         .body(Body::from(
+    //             serde_json::to_string::<(Config, ExperimentConfig)>(&(
+    //                 config_data,
+    //                 experiment_config_data,
+    //             ))
+    //             .unwrap(),
+    //         ))
+    //         .unwrap();
+    //
+    //     let response = oneshot_request(request).await;
+    //     let status = response.status();
+    //     assert_eq!(
+    //         status,
+    //         StatusCode::OK,
+    //         "Expected a successful request, got status: {status}"
+    //     );
+    // }
+}

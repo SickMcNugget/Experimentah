@@ -1,6 +1,0 @@
-{
-    "job_id": "ValidJob",
-    "experiment_id": "ValidExperiment",
-    "workload": "recsaZeroTests",
-    "workload_type": "Native"
-}

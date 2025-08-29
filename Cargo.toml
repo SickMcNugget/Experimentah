@@ -1,8 +1,9 @@
 [workspace]
-members = ["controller", "metrics-api", "runner"]
+members = ["controller", "cli"]
 resolver = "2"
 
 [workspace.package]
+name = "experimentah"
 version = "0.1.0"
 edition = "2021"
 
@@ -13,7 +14,3 @@ serde = { version = "1.0.204", features = ["derive"] }
 clap = { version = "4.5.11", features = ["derive", "string"] }
 reqwest = { version = "0.12.5", features = ["json"] }
 tokio = { version = "1", features = ["full"] }
-
-# [[bin]]
-# name = "controller"
-# path = "controller/src/main.rs"

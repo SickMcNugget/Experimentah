@@ -1,4 +1,13 @@
+# build cache
 /target
 node_modules/
+
+# miscellaneous files
 *.png
-metrics-api/docker/data/
+*.env
+
+# runtime artifacts
+controller/storage
+
+# Developer files
+.tmuxw
