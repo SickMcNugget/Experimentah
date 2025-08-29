@@ -1,7 +1,7 @@
 use std::{env, sync::Arc};
 
 use axum::{
-    routing::{get, post},
+    routing::{any, get, post},
     Router,
 };
 
@@ -46,5 +46,6 @@ fn router(run_state: RunState) -> Router {
         .route("/status", get(routes::status))
         .route("/run", post(routes::run))
         .route("/upload", post(routes::upload))
+        .route("/ws", any(routes::ws_handler))
         .with_state(run_state)
 }
