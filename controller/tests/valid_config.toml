@@ -1,16 +1,37 @@
+# Required: A list of hosts for use with experiment configurations.
 [[hosts]]
-name = "runner1"
-address = "localhost"
-infrastructure = "linux"
+# Required: The name to use for this host internally
+name = "test-runner"
+# Required: The SSH connection string to use for reaching this host.
+# Note: Currently, you need to have passwordless access to the remote server.
+# Note: "localhost" is a special host that will always work in experiment configuraiton files without being defined here.
+address = "testuser@testserver.internal"
+
+# Optional: A list of exporters for collecting metrics in parallel to experiments whilst they are running
+[[exporters]]
+# Required: The name of the exporter
+name = "test-exporter"
+# Required: The hosts that the exporter will run on
+hosts = ["test-runner"]
+# The below options "script" and "command" are mutually exclusive, but one must be present.
+
+# The below options "command" and "script" are mutually exclusive, and neither are required.
+# The command which executes the exporter.
+#			command = "sar -o collection.bin 1"
+# The script to run which executes the exporter
+# If your exporter is written in another language, you will likely need a wrapper script.
+script = "sarexporter.sh"
+
+# The below options "setup_command" and "setup_script" are mutually exclusive, and neither are required.
+# The command to run which should prepare exporters for execution
+setup.command = "dnf install -y sysstat; apt install -y sysstat"
+# The script to run which should prepare exporters for execution
+#			setup_script = "myexporter.sh"
+# Dependencies for exporters are not currently supported, but this may appear in the future!
 
 [[exporters]]
-name = "test-exporter"
-hosts = ["runner1"]
-command = "sar -o collection.bin"
-setup = ["dnf install -y sysstat", "apt install -y sysstat"]
-kind = "node"
-[[exporters]]
-name = "another-test-exporter"
-hosts = ["runner1"]
-command = "my_collector"
-kind = "node"
+name = "test-exporter-2"
+# This key still works even though it isn't defined above!
+hosts = ["localhost"]
+command = "my exporter command"
+setup.script = "exporter_prep_script.sh"

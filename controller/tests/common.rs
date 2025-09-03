@@ -7,6 +7,50 @@ pub fn test_path() -> PathBuf {
     PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("tests")
 }
 
+pub fn to_string_side_by_side<A: std::fmt::Display + std::fmt::Debug>(
+    struct_name: &str,
+    a: &A,
+    b: &A,
+    padding: usize,
+) -> String {
+    let mut result = String::new();
+    let a_lines: Vec<String> =
+        a.to_string().lines().map(String::from).collect();
+    let b_lines: Vec<String> =
+        b.to_string().lines().map(String::from).collect();
+
+    let max_lines = a_lines.len().max(b_lines.len());
+    let table_row_str = "-".repeat(padding);
+
+    result.push_str(&format!(
+        "Actual {struct_name:<width_a$} | Expected {struct_name:<width_b$}\n",
+        width_a = padding - 7,
+        width_b = padding - 9
+    ));
+    result.push_str(&format!(
+        "{table_row_str:<width$} | {table_row_str:<width$}\n",
+        width = padding
+    ));
+
+    for i in 0..max_lines {
+        let default = String::new();
+        let a_line = a_lines.get(i).unwrap_or(&default);
+        let b_line = b_lines.get(i).unwrap_or(&default);
+        if a_line != b_line {
+            result.push_str(&format!(
+                "\x1b[0;26m{a_line:<width$}\x1b[0m | \x1b[0;31m{b_line:<width$}\x1b[0m\n", width=padding
+            ));
+        } else {
+            result.push_str(&format!(
+                "{a_line:<width$} | {b_line:<width$}\n",
+                width = padding
+            ));
+        }
+    }
+
+    result
+}
+
 // pub fn storage_path() -> PathBuf {
 //     PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("storage")
 // }

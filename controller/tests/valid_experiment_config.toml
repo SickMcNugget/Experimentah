@@ -1,32 +1,92 @@
+# Required: The basename of the experiment.
 name = "localhost-experiment"
+
+# Required: A description of the experiment
 description = "Testing the functionality of the software completely using localhost"
+
+# Required: The name of the script which runs the experiment.
+script = "actual-work.sh"
+
+# Required: The hosts that this experiment will run on.
+hosts = ["test-runner"]
+
+# Optional: An identifier to help with parsing the experiment results. Imagine that you have several different "versions" of your experiment. This can be used as an indicator to a parsing script.
 kind = "localhost-result"
-execute = "actual-work.sh"
+
+# Optional: A list of dependencies that the main script requires to function.
+# These can be either files or directories.
+dependencies = ["dependency.sh"]
+
+# Optional: The arguments to pass to the script.
 arguments = ["Argument 1", "Argument 2"]
-# Optional, not checked if omitted
-# If you need to override on a per-variation basis, omit the top-level definition,
-# and instead add it to the individual variation.
+
+# Optional: The number of arguments expected for the script.
+# This can be used to reduce errors whilst writing config files.
 expected_arguments = 2
-hosts = ["runner1"]
-# Optional, defaults to 1
+
+# Optional: The number of times to run an experiment and all it's variations. Defaults to 1.
+# Note: Experiments first iterate through all variations, and then the run counter is incremented, as opposed to repeating each variation N times before continuing.
 runs = 1
 
-[[setup]]
-hosts = ["runner1"]
-scripts = ["test-setup.sh"]
+# Optional: The exporters to run alongside this experiment
+exporters = []
+
+# Optional: A list of setup instructions to run across different hosts
+[[setups]]
+# Required: The hosts to perform this setup on
+hosts = ["test-runner"]
+# The below options "script" and "command" are mutually exclusive, but one must be run.
+# The script to perform setup on this host
+script = "test-setup.sh"
+# The command to perform setup on this host
+# Note that arguments will be quoted.
+# The below command becomes: 'echo "hi" "friend"'.
+# Quote as required to ensure the desired effect
+#			command = 'echo hi friend'
+# Optional: a list of dependencies that the setup requires to function.
+# This can be used whether a script or a command was chosen
+dependencies = ["setup-dependency.sh"]
+
+# Optional: A list of teardown instructions to run across different hosts
+[[teardowns]]
+hosts = ["test-runner"]
+# The below options "script" and "command" are mutually exclusive, but one must be run.
+# The script to perform setup on this host
+script = "test-teardown.sh"
+# The command to perform setup on this host
+# Note that arguments will be quoted.
+# The below command becomes: 'echo "hi" "friend"'.
+# Quote as required to ensure the desired effect
+#			command = "echo hi friend"
+# Optional: a list of dependencies that the teardown requires to function.
+# This can be used whether a script or a command was chosen
+dependencies = ["teardown-dependency.sh"]
+
+# Optional: A list of variations to the inital experiment parameters.
 [[variations]]
-name = "base"
-# This empty variation will inherit all the top-level fields
-[[variations]]
+# Required: A non-empty suffix that is hyphen-joined to the basename of the experiment. The below suffix would make the experiment name: localhost-experiment-different args.
 name = "different args"
-arguments = ["Argument 1"]
+# Optional: Overrides the description from the top-level key
+description = "A completely new description"
+# Optional: Overrides the expected arguments from the top-level key
 expected_arguments = 1
+# Optional: Overrides the arguments from the top-level key
+arguments = ["Argument 1"]
+
 [[variations]]
+# Required: A non-empty suffix that is hyphen-joined to the basename of the experiment. The below suffix would make the experiment name: localhost-experiment-with exporter.
 name = "with exporter"
+# Optional: Overrides the exporters from the top-level key.
 exporters = ["test-exporter"]
+
 [[variations]]
+# Required: A non-empty suffix that is hyphen-joined to the basename of the experiment. The below suffix would make the experiment name: localhost-experiment-with multiple exporters.
 name = "with multiple exporters"
-exporters = ["test-exporter", "another-test-exporter"]
-[[teardown]]
-hosts = ["runner1"]
-scripts = ["test-teardown.sh"]
+# Optional: Overrides the exporters from the top-level key.
+exporters = ["test-exporter", "test-exporter-2"]
+
+[[variations]]
+# Required: A non-empty suffix that is hyphen-joined to the basename of the experiment. The below suffix would make the experiment name: localhost-experiment-with multiple exporters.
+name = "with different host"
+# Optional: Overrides the exporters from the top-level key.
+hosts = ["localhost"]
