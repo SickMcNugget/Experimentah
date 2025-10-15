@@ -31,6 +31,9 @@ runs = 1
 # Optional: The exporters to run alongside this experiment
 exporters = []
 
+# Optional: When enabled, disables a top-level experiment from being created, and instead only relies on variations.
+variations_only = false
+
 # Optional: A list of setup instructions to run across different hosts
 [[setups]]
 # Required: The hosts to perform this setup on

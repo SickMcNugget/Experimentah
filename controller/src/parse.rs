@@ -357,7 +357,7 @@ impl ExporterConfig {
     }
 
     fn validate(&self, hosts: &[HostConfig]) -> Result<()> {
-        if hosts.is_empty() {
+        if self.hosts.is_empty() {
             Err(self.validation_error("No hosts were defined"))?;
         }
 
@@ -521,6 +521,11 @@ pub struct ExperimentConfig {
     /// experiment runs on.
     #[serde(default)]
     pub variations: Vec<VariationConfig>,
+    /// If this boolean is enabled, a top-level Experiment is not created.
+    /// This means that ONLY variations will be used to create experiments.
+    /// Defaults to false
+    #[serde(default)]
+    pub variations_only: bool,
 }
 
 impl ExperimentConfig {
@@ -630,6 +635,11 @@ impl ExperimentConfig {
         variations: &[VariationConfig],
     ) -> &mut Self {
         self.variations = variations.to_vec();
+        self
+    }
+
+    pub fn with_only_variations(&mut self, only_variations: bool) -> &mut Self {
+        self.variations_only = only_variations;
         self
     }
 
@@ -759,7 +769,14 @@ impl ExperimentConfig {
             }
         }
 
-        arguments_check(self.expected_arguments, self.arguments.as_ref())?;
+        if self.variations_only {
+            arguments_check_lax(
+                self.expected_arguments,
+                self.arguments.as_ref(),
+            )?;
+        } else {
+            arguments_check(self.expected_arguments, self.arguments.as_ref())?;
+        }
 
         if self.hosts.is_empty() {
             Err(self.validation_error("No hosts have been defined"))?;
@@ -774,6 +791,10 @@ impl ExperimentConfig {
 
         for teardown in self.teardowns.iter() {
             teardown.validate(config)?;
+        }
+
+        if self.variations_only && self.variations.is_empty() {
+            Err(self.validation_error("If only_variations is true, there must be at least one variation"))?;
         }
 
         for variation in self.variations.iter() {
@@ -892,6 +913,30 @@ fn arguments_check(
                 Err(Error::ValidationError("expected_arguments should be set to 0 if arguments is unset".to_string()))?;
             }
         }
+        (Some(expected), Some(arguments)) => {
+            if expected != arguments.len() {
+                Err(Error::ValidationError(format!(
+                    "Expected {expected} arguments, got {}",
+                    arguments.len()
+                )))?;
+            }
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
+
+fn arguments_check_lax(
+    expected_arguments: Option<usize>,
+    arguments: Option<&Vec<String>>,
+) -> Result<()> {
+    match (expected_arguments, arguments) {
+        // (Some(expected), None) => {
+        //     if expected != 0 {
+        //         Err(Error::ValidationError("expected_arguments should be set to 0 if arguments is unset".to_string()))?;
+        //     }
+        // }
         (Some(expected), Some(arguments)) => {
             if expected != arguments.len() {
                 Err(Error::ValidationError(format!(
@@ -1063,11 +1108,10 @@ impl VariationConfig {
         }
 
         if self.hosts.is_empty()
-            && self.expected_arguments.is_none()
             && self.arguments.is_none()
             && self.exporters.is_empty()
         {
-            Err(self.validation_error("At least one of 'hosts', 'expected_arguments', 'arguments' or 'exporters' needs to be defined."))?;
+            Err(self.validation_error("At least one of 'hosts', 'arguments' or 'exporters' needs to be defined."))?;
         }
 
         hosts_check(&config.hosts, &self.hosts)?;
@@ -2008,11 +2052,14 @@ pub fn generate_experiments<P: AsRef<Path>>(
         .unwrap_or(ExperimentConfig::DEFAULT_RUNS);
 
     let mut experiments = Vec::with_capacity(variations.len() + 1);
-    experiments.push(Experiment::try_from((
-        config,
-        experiment_config,
-        storage_dir.as_ref(),
-    ))?);
+
+    if !experiment_config.variations_only {
+        experiments.push(Experiment::try_from((
+            config,
+            experiment_config,
+            storage_dir.as_ref(),
+        ))?);
+    }
 
     for variation in experiment_config.variations.iter() {
         experiments.push(Experiment::try_from((

@@ -1,0 +1,8 @@
+[[exporters]]
+name = "test-exporter"
+hosts = ["localhost"]
+# this should not run for a fixed run time, it should be ended when the experiment is ended
+# this is just for testing results collection
+command = "sar -o sar_output.bin 1 10"
+setup.command = "dnf install -y sysstat; apt install -y sysstat"
+kind = "node"

@@ -1,4 +1,4 @@
-# Required: A list of hosts for use with experiment configurations.
+# Optional: A list of hosts for use with experiment configurations.
 [[hosts]]
 # Required: The name to use for this host internally
 name = "test-runner"

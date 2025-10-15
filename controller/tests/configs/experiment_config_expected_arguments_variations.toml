@@ -1,0 +1,22 @@
+name = "experiment-config-test-expected-arguments"
+description = "A test checking whether arguments are being validated correctly when only_variations=true"
+hosts = ["test-runner"]
+
+script = "actual-work.sh"
+expected_arguments = 2
+
+variations_only=true
+
+[[variations]]
+name = "two-arguments"
+arguments = ["Argument 1", "Argument 2"]
+
+[[variations]]
+name = "one-argument"
+expected_arguments = 1
+arguments = ["Argument 1"]
+
+# Testing whether inheriting arguments works
+[[variations]]
+name = "empty-exporter"
+exporters = ["test-exporter"]

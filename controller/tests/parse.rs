@@ -1,7 +1,9 @@
 pub mod common;
 
 use crate::common::{
-    test_path, to_string_side_by_side, VALID_CONFIG, VALID_EXPERIMENT_CONFIG,
+    configs_path, read_in_config, read_in_default_config,
+    read_in_default_configs, read_in_experiment_config, test_path,
+    to_string_side_by_side,
 };
 use std::{
     collections::HashMap,
@@ -40,6 +42,7 @@ struct ConfigTestCase {
     toml: Table,
     should_parse: bool,
     should_validate: bool,
+    expected_missing: bool,
 }
 
 impl ConfigTestCase {
@@ -48,6 +51,7 @@ impl ConfigTestCase {
             toml,
             should_parse,
             should_validate,
+            expected_missing: false,
         }
     }
 }
@@ -111,21 +115,16 @@ where
 
         // At this point, we expect that our key is missing (because it isn't present as part of
         // the test), so we just skip to the next test, as we're happy here.
-        // if test_case.expected_missing {
-        //     continue;
-        // }
+        if test_case.expected_missing {
+            continue;
+        }
 
         let expected_config = builder_fn(test_case);
 
         assert!(
             config == expected_config,
             "{}",
-            to_string_side_by_side(
-                "Experiment Config",
-                &config,
-                &expected_config,
-                63
-            )
+            to_string_side_by_side("Config", &config, &expected_config, 63)
         );
     }
 }
@@ -135,6 +134,7 @@ fn config_parse_hosts() {
     let start_table = Table::new();
 
     let tests = [
+        (None, true, true),
         (Some(vec![]), true, true),
         (
             Some(vec![HostConfig::new(
@@ -232,6 +232,19 @@ fn config_parse_exporters() {
                 ))
                 .clone(),
             ]),
+            true,
+            true,
+        ),
+        (
+            Some(vec![ExporterConfig::new(
+                "test-exporter",
+                vec!["localhost"],
+                CommandSource::from_command("sar -o sar_output.bin 1 10"),
+            )
+            .with_setup(CommandSource::from_command(
+                "dnf install -y sysstat; apt install -y sysstat",
+            ))
+            .clone()]),
             true,
             true,
         ),
@@ -362,12 +375,12 @@ where
                 convert_fn(&mut table, val);
             }
 
-            let test_case =
+            let mut test_case =
                 ConfigTestCase::new(table, *should_parse, *should_validate);
 
-            // if val.is_none() {
-            //     test_case.expected_missing = true;
-            // }
+            if val.is_none() {
+                test_case.expected_missing = true;
+            }
 
             test_case
         })
@@ -416,39 +429,6 @@ fn parse_and_validate_experiment_config(
         }
     }
     Some(experiment_config)
-}
-
-fn read_in_default_config() -> Config {
-    let config_path = test_path().join(VALID_CONFIG);
-    let config = match Config::from_file(&config_path) {
-        Ok(config) => config,
-        Err(e) => panic!("A valid config couldn't be parsed: {e}"),
-    };
-
-    if let Err(e) = config.validate() {
-        panic!("Unable to validate config: {e}");
-    }
-
-    config
-}
-
-fn read_in_default_configs() -> (Config, ExperimentConfig) {
-    let config = read_in_default_config();
-
-    let experiment_config_path = test_path().join(VALID_EXPERIMENT_CONFIG);
-    let experiment_config =
-        match ExperimentConfig::from_file(&experiment_config_path) {
-            Ok(experiment_config) => experiment_config,
-            Err(e) => {
-                panic!("A valid experiment config couldn't be parsed: {e}")
-            }
-        };
-
-    if let Err(e) = experiment_config.validate(&config) {
-        panic!("Unable to validate experiment config: {e}");
-    }
-
-    (config, experiment_config)
 }
 
 fn experiment_config_parse_generic<F>(
@@ -1174,7 +1154,19 @@ fn experiment_config_parse_variations() {
             true,
             false,
         ),
-        (Some(vec![VariationConfig::new("variation-1")]), true, false),
+        (
+            Some(vec![VariationConfig::new("test-variation")]),
+            true,
+            false,
+        ),
+        (
+            // expected_arguments by itself should not constitute a valid variation!
+            Some(vec![VariationConfig::new("test-variation")
+                .with_expected_arguments(0)
+                .clone()]),
+            true,
+            false,
+        ),
     ];
 
     let test_cases = map_tests(&tests, start_table, |table, variations| {
@@ -1205,6 +1197,40 @@ fn experiment_config_parse_variations() {
         experiment_config.with_variations(&variations);
         experiment_config
     });
+}
+
+#[test]
+// these tests check for wider integration between multiple different valid config files
+fn valid_config_files() {
+    for entry in configs_path()
+        .read_dir()
+        .expect("Failed to read configs directory")
+    {
+        let entry = entry.expect("Failed to read directory entry");
+        let file_name = entry.file_name();
+
+        if file_name.to_string_lossy().starts_with("config") {
+            read_in_config(&entry.path());
+        }
+    }
+}
+
+#[test]
+// these tests check for wider integration between multiple different valid config files
+fn valid_experiment_config_files() {
+    let config = read_in_default_config();
+
+    for entry in configs_path()
+        .read_dir()
+        .expect("Failed to read configs directory")
+    {
+        let entry = entry.expect("Failed to read directory entry");
+        let file_name = entry.file_name();
+
+        if file_name.to_string_lossy().starts_with("experiment_config") {
+            read_in_experiment_config(&entry.path(), &config);
+        }
+    }
 }
 
 #[test]

@@ -1,10 +1,15 @@
-use std::path::PathBuf;
+use controller::parse::{Config, ExperimentConfig};
+use std::path::{Path, PathBuf};
 
-pub const VALID_CONFIG: &str = "valid_config.toml";
-pub const VALID_EXPERIMENT_CONFIG: &str = "valid_experiment_config.toml";
+pub const VALID_CONFIG: &str = "config_valid.toml";
+pub const VALID_EXPERIMENT_CONFIG: &str = "experiment_config_valid.toml";
 
 pub fn test_path() -> PathBuf {
     PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("tests")
+}
+
+pub fn configs_path() -> PathBuf {
+    test_path().join("configs")
 }
 
 pub fn to_string_side_by_side<A: std::fmt::Display + std::fmt::Debug>(
@@ -51,6 +56,45 @@ pub fn to_string_side_by_side<A: std::fmt::Display + std::fmt::Debug>(
     result
 }
 
-// pub fn storage_path() -> PathBuf {
-//     PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("storage")
-// }
+pub fn read_in_config(path: &Path) -> Config {
+    let config = match Config::from_file(path) {
+        Ok(config) => config,
+        Err(e) => panic!("A valid config couldn't be parsed: {e}"),
+    };
+
+    if let Err(e) = config.validate() {
+        panic!("Unable to validate config: {e}");
+    }
+
+    config
+}
+
+pub fn read_in_experiment_config(
+    path: &Path,
+    config: &Config,
+) -> ExperimentConfig {
+    let experiment_config = match ExperimentConfig::from_file(path) {
+        Ok(experiment_config) => experiment_config,
+        Err(e) => panic!("A valid config couldn't be parsed: {e}"),
+    };
+
+    if let Err(e) = experiment_config.validate(config) {
+        panic!("Unable to validate config: {e}");
+    }
+
+    experiment_config
+}
+
+pub fn read_in_default_config() -> Config {
+    read_in_config(&configs_path().join(VALID_CONFIG))
+}
+
+pub fn read_in_default_configs() -> (Config, ExperimentConfig) {
+    let config = read_in_default_config();
+    let experiment_config = read_in_experiment_config(
+        &configs_path().join(VALID_EXPERIMENT_CONFIG),
+        &config,
+    );
+
+    (config, experiment_config)
+}

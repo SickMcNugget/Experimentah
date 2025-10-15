@@ -71,6 +71,7 @@ expected_arguments = 2
 runs = 1
 
 exporters = []
+only_variations = false
 
 [[setups]]
 hosts = ["test-runner"]
@@ -109,6 +110,9 @@ Some important notes regarding experiment configurations are:
   the experiment. These can be used to prepare hosts in some way
   before running a main experiment script. Teardowns are the same,
   but run just after each variation of the experiment finishes.
+- If you don't have a 'base' experiment, and you only want to run
+  variations from some common configuration, you can use the 
+  only_variations field to enable this functionality.
 
 Some fields are required, and others are not. They are listed below.
 
@@ -124,6 +128,7 @@ Some fields are required, and others are not. They are listed below.
 | expected_arguments | false   |
 | runs | false   |
 | exporters | false   |
+| only_variations | false   |
 | setups | false   |
 | setups.hosts | true   |
 | setups.script | one of these 2 |
