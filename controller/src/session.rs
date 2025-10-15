@@ -352,10 +352,8 @@ pub async fn run_script_at<P: AsRef<Path>, R: AsRef<Path>>(
     script: P,
     directory: R,
 ) -> Result<()> {
-    let mut shell_command = ShellCommand::from_command_args(&[script
-        .as_ref()
-        .to_string_lossy()
-        .to_string()]);
+    let mut shell_command =
+        ShellCommand::from_command(script.as_ref().to_string_lossy());
     shell_command.working_directory(directory);
     command::run_command(sessions, shell_command, ExecutionType::Output)
         .await?;

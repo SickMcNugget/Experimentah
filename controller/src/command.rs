@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use openssh::Stdio;
 
+use crate::parse::CommandSource;
 use crate::session::{OpenSSHChild, Session, Sessions};
 // use crate::session::{Session, Sessions};
 use crate::DEFAULT_INTERPRETER;
@@ -92,6 +93,18 @@ impl ShellCommand {
         }
 
         new
+    }
+
+    pub fn from_parsed_command(parsed_command: &CommandSource) -> Self {
+        match parsed_command {
+            CommandSource::Command(ref command) => {
+                let command_args = shlex::split(command).expect("A command should not fail to parse as a ShellCommand. Update parse.rs to fix this.");
+                Self::from_command_args(&command_args)
+            }
+            CommandSource::Script(ref script) => {
+                Self::from_command(script.to_string_lossy())
+            }
+        }
     }
 
     // Constructs a new ShellCommand builder with a command

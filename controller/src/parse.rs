@@ -4,11 +4,23 @@
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use log::error;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::{fs, io};
+use std::sync::LazyLock;
+
+// The special string to use for localhost connections
+const LOCALHOST: &str = "localhost";
+
+// Represents an SSH connection string.
+// Currently, user is required.
+static RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^(\w+@)([a-zA-Z0-9.-]+)(:\d+)?$")
+        .expect("Unable to compile regex")
+});
 
 /// A specialised [`Result`] type for Parsing operations.
 ///
@@ -152,17 +164,11 @@ impl From<(String, Error)> for Error {
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct Config {
     /// A Vector of [`HostConfig`]s which represents distinct hosts for use in experiments.
+    #[serde(default)]
     pub hosts: Vec<HostConfig>,
     /// A vector of [`ExporterConfig`]s which represent distinct exporters for use in experiments.
+    #[serde(default)]
     pub exporters: Vec<ExporterConfig>,
-}
-
-impl FromStr for Config {
-    type Err = Error;
-    /// Allows the generation of a [`Config`] from a TOML string
-    fn from_str(s: &str) -> Result<Self> {
-        Self::parse_toml(s)
-    }
 }
 
 impl Config {
@@ -204,10 +210,39 @@ impl Config {
         }
         Ok(())
     }
+
+    pub fn validate_files<P: AsRef<Path>>(&self, storage_dir: P) -> Result<()> {
+        for exporter in self.exporters.iter() {
+            exporter.validate_files(&storage_dir)?;
+        }
+        Ok(())
+    }
+}
+
+impl Display for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "Config")?;
+        for host in self.hosts.iter() {
+            writeln!(f, "{host}")?;
+        }
+
+        for exporter in self.exporters.iter() {
+            writeln!(f, "{exporter}")?;
+        }
+        Ok(())
+    }
+}
+
+impl FromStr for Config {
+    type Err = Error;
+    /// Allows the generation of a [`Config`] from a TOML string
+    fn from_str(s: &str) -> Result<Self> {
+        Self::parse_toml(s)
+    }
 }
 
 /// A [`HostConfig`] represents an SSH host which may be needed in an experiment.
-#[derive(Serialize, Deserialize, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
 pub struct HostConfig {
     /// An identifier to be used in place of the address in other config fields.
     pub name: String,
@@ -217,10 +252,45 @@ pub struct HostConfig {
 }
 
 impl HostConfig {
+    pub fn new<S: Into<String>>(name: S, address: S) -> Self {
+        Self {
+            name: name.into(),
+            address: address.into(),
+        }
+    }
+
+    fn validation_error(&self, message: &str) -> Error {
+        Error::ValidationError(format!(
+            "Invalid host '{}': {}",
+            &self.name, message
+        ))
+    }
+
     fn validate(&self) -> Result<()> {
-        // TODO(joren): The only validation we can do is
-        // check whether we have a valid address
+        if self.name.is_empty() {
+            return Err(self.validation_error("An empty name is not allowed"));
+        }
+
+        if self.name == LOCALHOST || self.address == LOCALHOST {
+            return Err(self.validation_error(&format!(
+                "Using a reserved keyword as it's address/name: {LOCALHOST}"
+            )));
+        }
+
+        if !RE.is_match(&self.address) {
+            return Err(self.validation_error(&format!(
+                "Invalid SSH connection string: {}",
+                &self.address
+            )));
+        }
+
         Ok(())
+    }
+}
+
+impl Display for HostConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "{}: {}", self.name, self.address)
     }
 }
 
@@ -230,52 +300,177 @@ impl HostConfig {
 
 /// An [`ExporterConfig`] stores information relating to metric collectors (which we call exporters
 /// in our framework).
-#[derive(Serialize, Deserialize, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
 pub struct ExporterConfig {
     /// An identifier for referring to this exporter within an [`ExperimentConfig`].
     pub name: String,
     /// A list of host identifiers referencing [`HostConfig`]s found inside of a [`Config`].
     pub hosts: Vec<String>,
-    /// A command to be run for collecting metrics.
-    pub command: String,
-    /// A list of setup commands that are run before trying to run the exporter.
-    #[serde(default)]
-    pub setup: Vec<String>,
+    /// Either a shell command or a script to run for collecting metrics.
+    #[serde(flatten)]
+    pub command: CommandSource,
+    /// Either a shell command or a script which prepares any resources the exporter needs.
+    pub setup: Option<CommandSource>,
+    // /// A command to be run for collecting metrics.
+    // pub command: Option<String>,
+    // /// A script to run for collecting metrics.
+    // pub script: Option<PathBuf>,
+    // /// A setup command which prepares any resources the exporter needs.
+    // pub setup_command: Option<String>,
+    // /// A setup script which prepares any resources the exporter needs.
+    // pub setup_script: Option<PathBuf>,
 }
 
 impl ExporterConfig {
-    fn validate(&self, hosts: &[HostConfig]) -> Result<()> {
-        // Ensure we have a valid command
-        shlex::split(&self.command).ok_or(Error::ValidationError(format!(
-            "Invalid command for exporter {}: {}",
-            self.name, self.command
-        )))?;
+    pub fn new<S>(name: S, hosts: Vec<S>, command: CommandSource) -> Self
+    where
+        S: Into<String>,
+    {
+        let hosts: Vec<String> =
+            hosts.into_iter().map(|host| host.into()).collect();
 
-        // Ensure we have valid setup commands
-        for command in self.setup.iter() {
-            shlex::split(command).ok_or(Error::ValidationError(format!(
-                "Invalid setup command for exporter {}: {}",
-                self.name, command
-            )))?;
+        Self {
+            name: name.into(),
+            hosts,
+            command,
+            setup: None,
+        }
+    }
+
+    pub fn with_setup(&mut self, setup: CommandSource) -> &mut Self {
+        self.setup = Some(setup);
+        self
+    }
+
+    fn validation_error(&self, message: &str) -> Error {
+        Error::ValidationError(format!(
+            "Invalid exporter '{}': {}",
+            self.name, message
+        ))
+    }
+
+    fn io_error(&self, message: &str, e: io::Error) -> Error {
+        Error::ValidationError(format!(
+            "Invalid exporter '{}': {}: {e}",
+            self.name, message
+        ))
+    }
+
+    fn validate(&self, hosts: &[HostConfig]) -> Result<()> {
+        if self.hosts.is_empty() {
+            Err(self.validation_error("No hosts were defined"))?;
         }
 
-        // Ensure the hosts exist
-        for host in self.hosts.iter() {
-            hosts.iter().find(|c_host| c_host.name == *host).ok_or(
-                Error::ValidationError(format!(
-                    "Invalid host definition for exporter {}: {}",
-                    self.name, host
-                )),
-            )?;
+        // Ensure we have valid hosts
+        hosts_check(hosts, &self.hosts)
+            .map_err(|e| self.validation_error(&e.to_string()))?;
+
+        self.command
+            .validate()
+            .map_err(|e| self.validation_error(&e.to_string()))?;
+
+        if let Some(setup) = &self.setup {
+            setup
+                .validate()
+                .map_err(|e| self.validation_error(&e.to_string()))?;
         }
 
         Ok(())
+    }
+
+    fn validate_files<P: AsRef<Path>>(&self, storage_dir: P) -> Result<()> {
+        self.command
+            .validate_files(&FileType::Exporter, &storage_dir)
+            .map_err(|e| self.io_error("Invalid setup command", e))?;
+
+        if let Some(setup_command) = &self.setup {
+            setup_command
+                .validate_files(&FileType::Exporter, &storage_dir)
+                .map_err(|e| self.io_error("Invalid setup command", e))?;
+        }
+        Ok(())
+    }
+}
+
+impl Display for ExporterConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "{}", self.name)?;
+        for host in self.hosts.iter() {
+            writeln!(f, "{host}")?;
+        }
+        writeln!(f, "command: {}", &self.command)?;
+
+        if let Some(setup) = &self.setup {
+            writeln!(f, "setup.command: {}", setup)?;
+        }
+        Ok(())
+    }
+}
+
+/// A command type allows us to select between either a direct shell command,
+/// or a .sh file for non *Config structs.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum CommandSource {
+    Command(String),
+    Script(PathBuf),
+}
+
+impl CommandSource {
+    pub fn from_command<S: Into<String>>(command: S) -> Self {
+        Self::Command(command.into())
+    }
+
+    pub fn from_script<P: Into<PathBuf>>(script: P) -> Self {
+        Self::Script(script.into())
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        match self {
+            Self::Command(command) => {
+                if command.is_empty() {
+                    return Err(Error::ValidationError(
+                        "An empty command is not permitted".to_string(),
+                    ));
+                }
+            }
+            Self::Script(script) => {
+                if script.file_name().is_none() {
+                    return Err(Error::ValidationError(
+                        "A script path must end with a file name".to_string(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_files<P: AsRef<Path>>(
+        &self,
+        file_type: &FileType,
+        storage_dir: P,
+    ) -> io::Result<()> {
+        if let Self::Script(script) = self {
+            check_files_exist(&[script], file_type, &storage_dir)?;
+        }
+        Ok(())
+    }
+}
+
+impl Display for CommandSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Command(command) => writeln!(f, "{command}"),
+            Self::Script(script) => {
+                writeln!(f, "{}", script.to_string_lossy())
+            }
+        }
     }
 }
 
 /// An [`ExperimentConfig`] defines an experiment to be run. Relies on a valid [`Config`] file
 /// existing before one can be defined.
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Default)]
 pub struct ExperimentConfig {
     // The ID is generated externally.
     // pub id: Option<String>,
@@ -285,61 +480,169 @@ pub struct ExperimentConfig {
     /// A description of the experiment which may provide important information for later
     /// reference. Descriptions may be empty.
     pub description: String,
-    /// A 'kind' is another identifier that may be useful for determining the output type of an
-    /// experiment. If the format of results changes for an experiment, it may be worth updating
-    /// the 'kind' field to indicate this.
-    pub kind: String,
-    /// The [`ExperimentConfig::execute`] file points to the main shell which runs the experiment.
-    pub execute: PathBuf,
-    #[serde(default)]
-    /// Dependencies is a list of filepaths that the [`ExperimentConfig::execute`] script relies on. These files are
+    /// The [`ExperimentConfig::script`] file points to the main shell which runs the experiment.
+    pub script: PathBuf,
+    /// A list of identifiers representing [`HostConfig`]s defined in the main [`Config`].
+    pub hosts: Vec<String>,
+    /// Dependencies is a list of paths that the [`ExperimentConfig::script`] script relies on. These files/directories are
     /// sent to remote hosts inside of a directory named *execute*-deps when an experiment begins.
     /// For each variation/repeat of the experiment, these files are then symlinked into the
     /// current variation directory so that the script can detect them.
-    pub dependencies: Vec<PathBuf>,
-    /// Arguments contains a list of command line arguments that are sent to the [`ExperimentConfig::execute`] script.
     #[serde(default)]
-    pub arguments: Vec<String>,
+    pub dependencies: Vec<PathBuf>,
+    /// Arguments contains a list of command line arguments that are sent to the [`ExperimentConfig::script`] script.
+    #[serde(default)]
+    pub arguments: Option<Vec<String>>,
     /// expected_arguments is an optional field for validating that each variation of the
-    /// experiment is providing the correct number of arguments to the [`ExperimentConfig::execute`] script.
+    /// experiment is providing the correct number of arguments to the [`ExperimentConfig::script`] script.
     pub expected_arguments: Option<usize>,
+    /// A 'kind' is another identifier that may be useful for determining the output type of an
+    /// experiment. If the format of results changes for an experiment, it may be worth updating
+    /// the 'kind' field to indicate this.
+    pub kind: Option<String>,
     /// runs represents the number of times an experiment should be repeated. This value can be any
     /// number in the range [1,65536). Note that the order of runs is to perform every single
     /// variation of an experiment and then repeat. This breadth-first ordering is generally
     /// preferable when running experiments.
-    #[serde(default = "ExperimentConfig::default_runs")]
-    pub runs: u16,
-    /// Setup contains a list of scripts to run on various remote hosts for preparing an
+    pub runs: Option<u16>,
+    /// A list of identifiers representing [`ExporterConfig`]s defined in the main [`Config`].
+    #[serde(default)]
+    pub exporters: Vec<String>,
+    /// Setups contains a list of scripts to run on various remote hosts for preparing an
     /// experiment.
     #[serde(default)]
-    pub setup: Vec<RemoteExecutionConfig>,
-    /// Teardown contains a list of scripts to run on various remote hosts for preparing an
+    pub setups: Vec<RemoteExecutionConfig>,
+    /// Teardowns contains a list of scripts to run on various remote hosts for preparing an
     /// experiment.
     #[serde(default)]
-    pub teardown: Vec<RemoteExecutionConfig>,
+    pub teardowns: Vec<RemoteExecutionConfig>,
     /// Variations allow an experiment to be run with minor variations, such as changing the input
     /// arguments/number of arguments, changing the exporters and/or changing the hosts which the
     /// experiment runs on.
     #[serde(default)]
     pub variations: Vec<VariationConfig>,
-    /// A list of identifiers representing [`ExporterConfig`]s defined in the main [`Config`].
+    /// If this boolean is enabled, a top-level Experiment is not created.
+    /// This means that ONLY variations will be used to create experiments.
+    /// Defaults to false
     #[serde(default)]
-    pub exporters: Vec<String>,
-    /// A list of identifiers representing [`HostConfig`]s defined in the main [`Config`].
-    #[serde(default)]
-    pub hosts: Vec<String>,
-}
-
-impl FromStr for ExperimentConfig {
-    type Err = Error;
-
-    /// Allows the generation of an [`ExperimentConfig`] from a TOML string
-    fn from_str(s: &str) -> Result<Self> {
-        Self::parse_toml(s)
-    }
+    pub variations_only: bool,
 }
 
 impl ExperimentConfig {
+    const DEFAULT_RUNS: u16 = 1;
+    const DEFAULT_KIND: &str = "default";
+
+    pub fn new<S, P>(name: S, description: S, script: P, hosts: &[S]) -> Self
+    where
+        S: Into<String> + Clone,
+        P: Into<PathBuf>,
+    {
+        let hosts = hosts.iter().map(|host| host.clone().into()).collect();
+
+        Self {
+            name: name.into(),
+            description: description.into(),
+            kind: None,
+            script: script.into(),
+            hosts,
+            ..Default::default()
+        }
+    }
+
+    pub fn with_kind<S: Into<String>>(&mut self, kind: S) -> &mut Self {
+        self.kind = Some(kind.into());
+        self
+    }
+
+    pub fn with_runs(&mut self, runs: u16) -> &mut Self {
+        self.runs = Some(runs);
+        self
+    }
+
+    pub fn with_dependencies<P: Into<PathBuf> + Clone>(
+        &mut self,
+        dependencies: &[P],
+    ) -> &mut Self {
+        let new_dependencies: Vec<PathBuf> = dependencies
+            .iter()
+            .map(|dependency| dependency.clone().into())
+            .collect();
+
+        self.dependencies = new_dependencies;
+        self
+    }
+
+    pub fn with_arguments<S: Into<String> + Clone>(
+        &mut self,
+        arguments: &[S],
+    ) -> &mut Self {
+        let new_arguments: Vec<String> = arguments
+            .iter()
+            .map(|argument| argument.clone().into())
+            .collect();
+
+        self.arguments = Some(new_arguments);
+        self
+    }
+
+    pub fn with_hosts<S: Into<String> + Clone>(
+        &mut self,
+        hosts: &[S],
+    ) -> &mut Self {
+        let new_hosts: Vec<String> =
+            hosts.iter().map(|host| host.clone().into()).collect();
+
+        self.hosts = new_hosts;
+        self
+    }
+
+    pub fn with_expected_arguments(
+        &mut self,
+        expected_arguments: usize,
+    ) -> &mut Self {
+        self.expected_arguments = Some(expected_arguments);
+        self
+    }
+
+    pub fn with_exporters<S: Into<String> + Clone>(
+        &mut self,
+        exporters: &[S],
+    ) -> &mut Self {
+        let new_exporters: Vec<String> = exporters
+            .iter()
+            .map(|exporter| exporter.clone().into())
+            .collect();
+
+        self.exporters = new_exporters;
+        self
+    }
+
+    pub fn with_setup(&mut self, setup: &[RemoteExecutionConfig]) -> &mut Self {
+        self.setups = setup.to_vec();
+        self
+    }
+
+    pub fn with_teardown(
+        &mut self,
+        teardown: &[RemoteExecutionConfig],
+    ) -> &mut Self {
+        self.teardowns = teardown.to_vec();
+        self
+    }
+
+    pub fn with_variations(
+        &mut self,
+        variations: &[VariationConfig],
+    ) -> &mut Self {
+        self.variations = variations.to_vec();
+        self
+    }
+
+    pub fn with_only_variations(&mut self, only_variations: bool) -> &mut Self {
+        self.variations_only = only_variations;
+        self
+    }
+
     /// Generates an [`ExperimentConfig`] from a TOML file.
     pub fn from_file<P: AsRef<Path>>(file: P) -> Result<Self> {
         let experiment_config_str = std::fs::read_to_string(file.as_ref())
@@ -359,30 +662,32 @@ impl ExperimentConfig {
     }
 
     fn parse_toml(toml: &str) -> Result<Self> {
-        let experiment_config = toml::from_str::<Self>(toml)
+        let mut experiment_config = toml::from_str::<Self>(toml)
             .map_err(|e| Error::from(("Error parsing experiment config", e)))?;
+
+        for setup in experiment_config.setups.iter_mut() {
+            setup.file_type = Some(FileType::Setup);
+        }
+
+        for teardown in experiment_config.teardowns.iter_mut() {
+            teardown.file_type = Some(FileType::Teardown);
+        }
 
         Ok(experiment_config)
     }
 
-    fn default_runs() -> u16 {
-        1
+    fn validation_error(&self, message: &str) -> Error {
+        Error::ValidationError(format!(
+            "Invalid experiment '{}': {message}",
+            self.name
+        ))
     }
 
-    fn validate_arguments(
-        name: &str,
-        expected: Option<usize>,
-        args: &[String],
-    ) -> Result<()> {
-        if expected.is_some_and(|a| a != args.len()) {
-            Err(Error::ValidationError(format!(
-                "Error in experiment '{}': Expected {} arguments, got {}",
-                name,
-                expected.unwrap(),
-                args.len()
-            )))?;
-        }
-        Ok(())
+    fn io_error(&self, message: &str, e: io::Error) -> Error {
+        Error::ValidationError(format!(
+            "Invalid experiment '{}': {message}: {e}",
+            self.name
+        ))
     }
 
     // NOTE: This function is always called BEFORE we generate experiments from the configuration,
@@ -391,52 +696,22 @@ impl ExperimentConfig {
     /// disk. This function shouldn't be used clientside, but it should be used the server which
     /// distributes files to remote hosts during runtime.
     pub fn validate_files<P: AsRef<Path>>(&self, storage_dir: P) -> Result<()> {
-        check_file_exists(&remap_filepath(
-            &self.execute,
-            &FileType::Execute,
-            &storage_dir,
-        )?)
-        .map_err(|e| {
-            Error::from((
-                format!("Missing files for experiment '{}'", self.name),
-                e,
-            ))
-        })?;
+        check_files_exist(&[&self.script], &FileType::Execute, &storage_dir)
+            .map_err(|e| self.io_error("Missing script", e))?;
 
-        validate_files(
+        check_files_exist(
             &self.dependencies,
             &FileType::Dependency,
             &storage_dir,
-        )?;
+        )
+        .map_err(|e| self.io_error("Missing dependency", e))?;
 
-        for setup in self.setup.iter() {
-            validate_files(&setup.scripts, &FileType::Setup, &storage_dir)
-                .map_err(|e| {
-                    Error::from((
-                        format!(
-                            "Missing files in setup for experiment '{}'",
-                            &self.name
-                        ),
-                        e,
-                    ))
-                })?;
+        for setup in self.setups.iter() {
+            setup.validate_files(&storage_dir)?;
         }
 
-        for teardown in self.teardown.iter() {
-            validate_files(
-                &teardown.scripts,
-                &FileType::Teardown,
-                &storage_dir,
-            )
-            .map_err(|e| {
-                Error::from((
-                    format!(
-                        "Missing files in teardown for experiment '{}'",
-                        &self.name
-                    ),
-                    e,
-                ))
-            })?;
+        for teardown in self.teardowns.iter() {
+            teardown.validate_files(&storage_dir)?;
         }
 
         Ok(())
@@ -455,57 +730,85 @@ impl ExperimentConfig {
     /// Any members of [`ExperimentConfig`] which are simple structs are validated here, any
     /// complex fields are delegated to their associated struct for validation.
     pub fn validate(&self, config: &Config) -> Result<()> {
-        if self.execute.clone().into_os_string().is_empty() {
-            Err(Error::ValidationError(
-                "The 'execute' field in an experiment config cannot be empty"
-                    .to_string(),
+        if self.name.is_empty() {
+            Err(self
+                .validation_error("An empty experiment name is not allowed"))?;
+        }
+
+        if self.description.is_empty() {
+            Err(self.validation_error(
+                "An empty experiment description is not allowed",
             ))?;
         }
 
-        for setup in self.setup.iter() {
-            setup.validate(config, &self.name).map_err(|e| {
-                Error::from((
-                    format!("Invalid setup for experiment '{}'", &self.name),
-                    e,
-                ))
-            })?;
+        if let Some(kind) = &self.kind {
+            if kind.is_empty() {
+                Err(self.validation_error(
+                    "If kind is defined, it cannot be empty",
+                ))?;
+            }
         }
 
-        // ExperimentConfig::validate_arguments(
-        //     &self.name,
-        //     self.expected_arguments,
-        //     &self.arguments,
-        // )?;
+        if let Some(runs) = &self.runs {
+            if *runs == 0 {
+                Err(self.validation_error(
+                    "If runs is defined, it must be greater than 0",
+                ))?;
+            }
+        }
 
-        hosts_check(&config.hosts, &self.hosts, &self.name)?;
-        exporters_check(&config.exporters, &self.exporters, &self.name)?;
+        if self.script.to_string_lossy().is_empty() {
+            Err(self.validation_error("An experiment script cannot be empty"))?;
+        }
 
-        // Ensure that all variations are valid,
-        // and also ensure that no 2 variations have the same name
-        for (i, variation) in self.variations.iter().enumerate() {
-            let name = variation.name.as_ref();
-            variation.validate(config, &self.name).map_err(|e| {
-                Error::from((
-                    format!(
-                        "Invalid variation (index {i}) for experiment '{}'",
-                        self.name
-                    ),
-                    e,
-                ))
-            })?;
+        for dependency in self.dependencies.iter() {
+            if dependency.to_string_lossy().is_empty() {
+                Err(self.validation_error(
+                    "An empty experiment dependency is not allowed",
+                ))?;
+            }
+        }
 
-            // Ensures that we have the correct number of arguments (if defined)
-            ExperimentConfig::validate_arguments(
-                name,
-                variation.expected_arguments,
-                &variation.arguments,
+        if self.variations_only {
+            arguments_check_lax(
+                self.expected_arguments,
+                self.arguments.as_ref(),
             )?;
+        } else {
+            arguments_check(self.expected_arguments, self.arguments.as_ref())?;
+        }
 
-            if self.hosts.is_empty() && variation.hosts.is_empty() {
-                return Err(Error::ValidationError(format!(
-                    "No hosts have been defined for experiment '{}'",
-                    self.name
-                )));
+        if self.hosts.is_empty() {
+            Err(self.validation_error("No hosts have been defined"))?;
+        }
+        hosts_check(&config.hosts, &self.hosts)?;
+
+        exporters_check(&config.exporters, &self.exporters)?;
+
+        for setup in self.setups.iter() {
+            setup.validate(config)?;
+        }
+
+        for teardown in self.teardowns.iter() {
+            teardown.validate(config)?;
+        }
+
+        if self.variations_only && self.variations.is_empty() {
+            Err(self.validation_error("If only_variations is true, there must be at least one variation"))?;
+        }
+
+        for variation in self.variations.iter() {
+            variation.validate(config)?;
+
+            // We need to cross reference if the variation hasn't defined arg
+            match (variation.expected_arguments, &variation.arguments) {
+                (None, Some(v_arguments)) => {
+                    arguments_check(self.expected_arguments, Some(v_arguments))?
+                }
+                (Some(v_expected), None) => {
+                    arguments_check(Some(v_expected), self.arguments.as_ref())?
+                }
+                _ => {}
             }
         }
 
@@ -517,39 +820,149 @@ impl ExperimentConfig {
         names.sort_unstable();
         names.dedup();
         if names.len() != self.variations.len() {
-            return Err(Error::ValidationError(format!(
-                "There were variations with duplicate names for experiment '{}'", self.name
-            )));
-        }
-
-        for teardown in self.teardown.iter() {
-            teardown.validate(config, &self.name).map_err(|e| {
-                Error::from((
-                    format!(
-                        "Invalid teardown for experiment '{}': {:?}",
-                        self.name, teardown
-                    ),
-                    e,
-                ))
-            })?;
+            Err(
+                self.validation_error("Variations cannot have duplicate names")
+            )?;
         }
 
         Ok(())
     }
 }
 
-fn hosts_check(
-    c_hosts: &[HostConfig],
-    hosts: &[String],
-    experiment_name: &str,
+impl Display for ExperimentConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "ExperimentConfig")?;
+        writeln!(f, "name: {}", &self.name)?;
+        writeln!(f, "description: {}", &self.description)?;
+        writeln!(
+            f,
+            "kind: {}",
+            self.kind.as_ref().unwrap_or(&String::from("None"))
+        )?;
+        writeln!(f, "script: {}", &self.script.to_string_lossy())?;
+
+        write!(f, "runs: ")?;
+        match &self.runs {
+            Some(runs) => writeln!(f, "{runs}")?,
+            None => writeln!(f, "None")?,
+        };
+
+        writeln!(f, "Dependencies")?;
+        for dependency in self.dependencies.iter() {
+            writeln!(f, "{}", dependency.to_string_lossy())?;
+        }
+
+        writeln!(f, "Arguments")?;
+        if let Some(arguments) = &self.arguments {
+            for argument in arguments.iter() {
+                writeln!(f, "{}", argument)?;
+            }
+        }
+
+        write!(f, "expected arguments: ")?;
+        match &self.expected_arguments {
+            Some(expected_arguments) => writeln!(f, "{expected_arguments}")?,
+            None => writeln!(f, "None")?,
+        };
+
+        writeln!(f, "Hosts")?;
+        for host in self.hosts.iter() {
+            writeln!(f, "{host}")?;
+        }
+
+        writeln!(f, "Exporters")?;
+        for exporter in self.exporters.iter() {
+            writeln!(f, "{exporter}")?;
+        }
+
+        writeln!(f, "Setup")?;
+        for re in self.setups.iter() {
+            writeln!(f, "{re}")?;
+        }
+
+        writeln!(f, "Teardown")?;
+        for re in self.teardowns.iter() {
+            writeln!(f, "{re}")?;
+        }
+
+        writeln!(f, "Variations")?;
+        for variation in self.variations.iter() {
+            writeln!(f, "{variation}")?;
+        }
+
+        Ok(())
+    }
+}
+
+impl FromStr for ExperimentConfig {
+    type Err = Error;
+
+    /// Allows the generation of an [`ExperimentConfig`] from a TOML string
+    fn from_str(s: &str) -> Result<Self> {
+        Self::parse_toml(s)
+    }
+}
+
+fn arguments_check(
+    expected_arguments: Option<usize>,
+    arguments: Option<&Vec<String>>,
 ) -> Result<()> {
+    match (expected_arguments, arguments) {
+        (Some(expected), None) => {
+            if expected != 0 {
+                Err(Error::ValidationError("expected_arguments should be set to 0 if arguments is unset".to_string()))?;
+            }
+        }
+        (Some(expected), Some(arguments)) => {
+            if expected != arguments.len() {
+                Err(Error::ValidationError(format!(
+                    "Expected {expected} arguments, got {}",
+                    arguments.len()
+                )))?;
+            }
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
+
+fn arguments_check_lax(
+    expected_arguments: Option<usize>,
+    arguments: Option<&Vec<String>>,
+) -> Result<()> {
+    match (expected_arguments, arguments) {
+        // (Some(expected), None) => {
+        //     if expected != 0 {
+        //         Err(Error::ValidationError("expected_arguments should be set to 0 if arguments is unset".to_string()))?;
+        //     }
+        // }
+        (Some(expected), Some(arguments)) => {
+            if expected != arguments.len() {
+                Err(Error::ValidationError(format!(
+                    "Expected {expected} arguments, got {}",
+                    arguments.len()
+                )))?;
+            }
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
+
+fn hosts_check(c_hosts: &[HostConfig], hosts: &[String]) -> Result<()> {
     for host in hosts.iter() {
-        if !c_hosts.iter().any(|c_host| c_host.name == *host) {
+        if (c_hosts.iter().all(|c_host| c_host.name != *host)
+            && host != LOCALHOST)
+            || host.is_empty()
+        {
             Err(Error::ValidationError(format!(
-                "Invalid host definition for experiment '{experiment_name}': got '{host}', expected one of {:?}",
+                "Invalid host definition, got '{host}', expected one of {:?}",
                 c_hosts
                     .iter()
                     .map(|c_host| &c_host.name)
+                    .chain(std::iter::once(&LOCALHOST.to_string()))
                     .collect::<Vec<&String>>()
             )))?;
         }
@@ -560,7 +973,6 @@ fn hosts_check(
 fn exporters_check(
     c_exporters: &[ExporterConfig],
     exporters: &[String],
-    experiment_name: &str,
 ) -> Result<()> {
     for exporter in exporters.iter() {
         if !c_exporters
@@ -568,7 +980,7 @@ fn exporters_check(
             .any(|c_exporter| c_exporter.name == *exporter)
         {
             Err(Error::ValidationError(format!(
-                "Invalid exporter for experiment '{experiment_name}': got '{exporter}', expected one of {:?}",
+                "Invalid exporter definition, got '{exporter}', expected one of {:?}",
                 c_exporters.iter().map(|c_exporter| &c_exporter.name).collect::<Vec<&String>>()
             )))?;
         }
@@ -586,44 +998,162 @@ fn exporters_check(
 /// A [`VariationConfig`] defines a variation of an [`ExperimentConfig`] to be run. This allows
 /// changing the arguments fed to a test to assess different inputs, or changing the system metrics
 /// to be collected.
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 pub struct VariationConfig {
     /// An identifier for this variation. This identifier is joined with the upper
     /// [`ExperimentConfig::name`] using a '-' character. It must be a non-empty String,
     /// unique to this variation within the [`ExperimentConfig`].
     pub name: String,
+    /// A description for this variation. This description overwrites any existing description
+    /// from the upper [`ExperimentConfig::description`].
+    pub description: Option<String>,
     /// A list of identifiers representing [`HostConfig`]s defined in the main [`Config`].
     #[serde(default)]
     pub hosts: Vec<String>,
     /// An optional integer specifying the expected number of script arguments required.
     pub expected_arguments: Option<usize>,
-    /// A list of strings containing arguments to be passed to the [`ExperimentConfig::execute`]
+    /// A list of strings containing arguments to be passed to the [`ExperimentConfig::script`]
     /// script.
     #[serde(default)]
-    pub arguments: Vec<String>,
+    pub arguments: Option<Vec<String>>,
     /// A list of identifiers representing [`ExporterConfig`]s defined in the main [`Config`].
     #[serde(default)]
     pub exporters: Vec<String>,
 }
 
 impl VariationConfig {
+    pub fn new<S: Into<String>>(name: S) -> Self {
+        Self {
+            name: name.into(),
+            description: None,
+            hosts: vec![],
+            expected_arguments: None,
+            arguments: None,
+            exporters: vec![],
+        }
+    }
+
+    pub fn with_description<S: Into<String>>(
+        &mut self,
+        description: S,
+    ) -> &mut Self {
+        self.description = Some(description.into());
+        self
+    }
+
+    pub fn with_hosts<S: Into<String> + Clone>(
+        &mut self,
+        hosts: &[S],
+    ) -> &mut Self {
+        let hosts = hosts.iter().map(|host| host.clone().into()).collect();
+        self.hosts = hosts;
+        self
+    }
+
+    pub fn with_expected_arguments(
+        &mut self,
+        expected_arguments: usize,
+    ) -> &mut Self {
+        self.expected_arguments = Some(expected_arguments);
+        self
+    }
+
+    pub fn with_arguments<S: Into<String> + Clone>(
+        &mut self,
+        arguments: &[S],
+    ) -> &mut Self {
+        let arguments = arguments
+            .iter()
+            .map(|argument| argument.clone().into())
+            .collect();
+        self.arguments = Some(arguments);
+        self
+    }
+
+    pub fn with_exporters<S: Into<String> + Clone>(
+        &mut self,
+        exporters: &[S],
+    ) -> &mut Self {
+        let exporters = exporters
+            .iter()
+            .map(|exporter| exporter.clone().into())
+            .collect();
+        self.exporters = exporters;
+        self
+    }
+
+    fn validation_error(&self, message: &str) -> Error {
+        Error::ValidationError(format!(
+            "Invalid experiment variation '{}': {message}",
+            self.name
+        ))
+    }
     /// Ensures that all fields of a [`VariationConfig`] are valid.
     ///
     /// A [`VariationConfig`] must contain a non-empty name, and the exporters/hosts referenced in
     /// here must also exist inside of the associated [`Config`] file.
-    pub fn validate(
-        &self,
-        config: &Config,
-        experiment_name: &str,
-    ) -> Result<()> {
+    pub fn validate(&self, config: &Config) -> Result<()> {
         if self.name.is_empty() {
-            Err(Error::ValidationError(format!(
-                "Invalid variation for experiment '{experiment_name}': empty name",
-                )))?;
+            Err(self.validation_error(
+                "An experiment variation cannot have an empty name",
+            ))?;
         }
 
-        hosts_check(&config.hosts, &self.hosts, &self.name)?;
-        exporters_check(&config.exporters, &self.exporters, &self.name)?;
+        if let Some(description) = &self.description {
+            if description.is_empty() {
+                Err(self.validation_error(
+                    "If defined, and experiment description cannot be empty",
+                ))?;
+            }
+        }
+
+        if self.hosts.is_empty()
+            && self.arguments.is_none()
+            && self.exporters.is_empty()
+        {
+            Err(self.validation_error("At least one of 'hosts', 'arguments' or 'exporters' needs to be defined."))?;
+        }
+
+        hosts_check(&config.hosts, &self.hosts)?;
+        arguments_check(self.expected_arguments, self.arguments.as_ref())?;
+        exporters_check(&config.exporters, &self.exporters)?;
+
+        Ok(())
+    }
+}
+
+impl Display for VariationConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "name: {}", self.name)?;
+
+        writeln!(
+            f,
+            "description: {}",
+            self.description.as_ref().unwrap_or(&String::from("None"))
+        )?;
+
+        writeln!(f, "Hosts")?;
+        for host in self.hosts.iter() {
+            writeln!(f, "{host}")?;
+        }
+
+        write!(f, "expected_arguments: ")?;
+        match &self.expected_arguments {
+            Some(expected_arguments) => writeln!(f, "{expected_arguments}")?,
+            None => writeln!(f, "None")?,
+        };
+
+        writeln!(f, "Arguments")?;
+        if let Some(arguments) = &self.arguments {
+            for argument in arguments.iter() {
+                writeln!(f, "{argument}")?;
+            }
+        }
+
+        writeln!(f, "Exporters")?;
+        for exporter in self.exporters.iter() {
+            writeln!(f, "{exporter}")?;
+        }
 
         Ok(())
     }
@@ -631,35 +1161,139 @@ impl VariationConfig {
 
 /// A [`RemoteExecutionConfig`] represents 1 or more scripts to be run remotely on 1 or more hosts.
 /// This struct is generally used for setup, teardown and execution of the main test script.
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 pub struct RemoteExecutionConfig {
     /// A list of host identifiers referencing [`HostConfig`]s found inside of a [`Config`].
     pub hosts: Vec<String>,
-    /// A list of file paths representing the scripts to be run, in order, on the hosts defined in
+    /// The shell command/script to be run in parallel on all hosts defined in
     /// [`RemoteExecutionConfig::hosts`].
-    pub scripts: Vec<PathBuf>,
+    #[serde(flatten)]
+    pub command: CommandSource,
+    // /// The path to a script to be run in parallel on all hosts defined in
+    // /// [`RemoteExecutionConfig::hosts`].
+    // pub script: Option<PathBuf>,
+    // /// The command to run in parallel on all hosts defined in
+    // /// [`RemoteExecutionConfig::hosts`]
+    // pub command: Option<String>,
+    /// A list of dependencies that the command/script requires to function correctly.
+    #[serde(default)]
+    pub dependencies: Vec<PathBuf>,
+    /// The FileType of this remote execution
+    #[serde(skip)]
+    pub file_type: Option<FileType>,
 }
 
 impl RemoteExecutionConfig {
-    #[deprecated = "Scripts are now executed directly by a shell."]
-    pub fn commands(&self) -> io::Result<Vec<String>> {
-        let mut commands = Vec::new();
+    pub fn new<S: Into<String> + Clone>(
+        hosts: &[S],
+        command: CommandSource,
+    ) -> Self {
+        let hosts: Vec<String> =
+            hosts.iter().map(|host| host.clone().into()).collect();
 
-        for script in self.scripts.iter() {
-            let script_str = fs::read_to_string(script)?;
-            for mut line in script_str.lines() {
-                line = line.trim();
-                if !line.is_empty() {
-                    commands.push(line.into());
-                }
+        Self {
+            hosts,
+            command,
+            dependencies: Default::default(),
+            file_type: None,
+        }
+    }
+
+    pub fn with_dependencies<P: Into<PathBuf> + Clone>(
+        &mut self,
+        dependencies: &[P],
+    ) -> &mut Self {
+        self.dependencies = dependencies
+            .iter()
+            .map(|dependency| dependency.clone().into())
+            .collect();
+
+        self
+    }
+
+    pub fn with_file_type(&mut self, file_type: FileType) -> &mut Self {
+        self.file_type = Some(file_type);
+        self
+    }
+
+    fn validation_error(&self, message: &str) -> Error {
+        let ft = self
+            .file_type
+            .as_ref()
+            .expect("FileType has not been assigned yet");
+        Error::ValidationError(format!(
+            "Invalid '{ft}' remote execution: {message}",
+        ))
+    }
+
+    fn io_error(&self, message: &str, e: io::Error) -> Error {
+        let ft = self
+            .file_type
+            .as_ref()
+            .expect("FileType has not been assigned yet");
+        Error::ValidationError(format!(
+            "Invalid '{ft}' remote execution: {message}: {e}"
+        ))
+    }
+
+    fn validate(&self, config: &Config) -> Result<()> {
+        if self.hosts.is_empty() {
+            Err(self.validation_error("No hosts were defined"))?;
+        }
+
+        hosts_check(&config.hosts, &self.hosts)?;
+
+        self.command
+            .validate()
+            .map_err(|e| self.validation_error(&e.to_string()))?;
+
+        for dependency in self.dependencies.iter() {
+            if dependency.to_string_lossy().is_empty() {
+                Err(self.validation_error(
+                    "If dependencies are defined, they cannot be empty",
+                ))?;
             }
         }
 
-        Ok(commands)
+        Ok(())
     }
 
-    fn validate(&self, config: &Config, experiment_name: &str) -> Result<()> {
-        hosts_check(&config.hosts, &self.hosts, experiment_name)
+    fn validate_files<P: AsRef<Path>>(&self, storage_dir: P) -> Result<()> {
+        self.command
+            .validate_files(self.file_type.as_ref().unwrap(), &storage_dir)
+            .map_err(|e| self.io_error("Invalid command", e))?;
+
+        check_files_exist(
+            &self.dependencies,
+            &FileType::Dependency,
+            &storage_dir,
+        )?;
+
+        Ok(())
+    }
+}
+
+impl Display for RemoteExecutionConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "RemoteExecutionConfig")?;
+        for host in self.hosts.iter() {
+            writeln!(f, "{host}")?;
+        }
+
+        writeln!(f, "command: {}", &self.command)?;
+
+        writeln!(f, "Dependencies")?;
+        for dependency in self.dependencies.iter() {
+            writeln!(f, "{}", dependency.to_string_lossy())?;
+        }
+
+        write!(f, "file_type: ")?;
+        match &self.file_type {
+            Some(file_type) => writeln!(f, "{file_type}")?,
+            None => writeln!(f, "None")?,
+        };
+
+        Ok(())
     }
 }
 
@@ -672,9 +1306,9 @@ where
     P: AsRef<Path>,
     R: AsRef<Path>,
 {
-    let scripts = remap_filepaths(files, file_type, storage_dir)?;
+    // let scripts = remap_filepaths(files, file_type, storage_dir)?;
 
-    check_files_exist(&scripts)
+    check_files_exist(files, file_type, &storage_dir)
         .map_err(|e| Error::from((format!("Missing {} file", file_type), e)))
 }
 
@@ -696,9 +1330,9 @@ pub struct Experiment {
     /// output formats.
     pub kind: String,
     /// A list of [`RemoteExecution`]s for performing setup before the experiment begins.
-    pub setup: Vec<RemoteExecution>,
+    pub setups: Vec<RemoteExecution>,
     /// A list of [`RemoteExecution`]s for performing teardown after the experiment ends.
-    pub teardown: Vec<RemoteExecution>,
+    pub teardowns: Vec<RemoteExecution>,
     /// A list of [`Host`]s which are used to establish SSH connections used throughout an
     /// experiment's runtime.
     pub hosts: Vec<Host>,
@@ -727,10 +1361,10 @@ impl Experiment {
                 .chain(self.exporters.iter().flat_map(|exporter| {
                     exporter.hosts.iter().map(|host| &host.address)
                 }))
-                .chain(self.setup.iter().flat_map(|stage| {
+                .chain(self.setups.iter().flat_map(|stage| {
                     stage.hosts.iter().map(|host| &host.address)
                 }))
-                .chain(self.teardown.iter().flat_map(|stage| {
+                .chain(self.teardowns.iter().flat_map(|stage| {
                     stage.hosts.iter().map(|host| &host.address)
                 }))
                 .collect();
@@ -751,23 +1385,230 @@ impl Experiment {
     /// This function exists so that dependencies can be uploaded to remote hosts before the
     /// experiment begins.
     pub fn files(&self) -> Vec<&Path> {
-        let mut files: Vec<&Path> = self
-            .execute
-            .scripts
-            .iter()
-            .map(|script| script.as_path())
-            .chain(self.setup.iter().flat_map(|setup| {
-                setup.scripts.iter().map(|script| script.as_path())
-            }))
-            .chain(self.teardown.iter().flat_map(|teardown| {
-                teardown.scripts.iter().map(|script| script.as_path())
-            }))
-            .chain(self.dependencies.iter().map(|script| script.as_path()))
-            .collect();
+        let mut files: Vec<&Path> = Vec::new();
+        if let CommandSource::Script(script) = &self.execute.command {
+            files.push(script);
+        }
+
+        for re in self.setups.iter() {
+            if let CommandSource::Script(script) = &re.command {
+                files.push(script);
+            }
+        }
+
+        for re in self.teardowns.iter() {
+            if let CommandSource::Script(script) = &re.command {
+                files.push(script);
+            }
+        }
+
+        for dep in self.dependencies.iter() {
+            files.push(dep.as_path());
+        }
 
         files.sort();
         files.dedup();
         files
+    }
+}
+
+impl TryFrom<(&Config, &ExperimentConfig, &Path)> for Experiment {
+    type Error = Error;
+
+    fn try_from(value: (&Config, &ExperimentConfig, &Path)) -> Result<Self> {
+        let (config, experiment_config, storage_dir) = value;
+        let kind = experiment_config
+            .kind
+            .clone()
+            .unwrap_or(ExperimentConfig::DEFAULT_KIND.to_string());
+
+        let setups = map_remote_executions(
+            config,
+            &experiment_config.setups,
+            FileType::Setup,
+            storage_dir,
+        )?;
+
+        let teardowns = map_remote_executions(
+            config,
+            &experiment_config.teardowns,
+            FileType::Teardown,
+            storage_dir,
+        )?;
+
+        let hosts = map_hosts(config, &experiment_config.hosts);
+        let execute = remap_execute(
+            config,
+            &experiment_config.script,
+            &experiment_config.hosts,
+            storage_dir,
+        )?;
+        let dependencies =
+            remap_dependencies(&experiment_config.dependencies, storage_dir)?;
+
+        let arguments = experiment_config.arguments.clone().unwrap_or(vec![]);
+        let exporters = map_exporters(config, &experiment_config.exporters);
+
+        Ok(Self {
+            id: None,
+            name: experiment_config.name.clone(),
+            description: experiment_config.description.clone(),
+            kind,
+            setups,
+            teardowns,
+            hosts,
+            execute,
+            dependencies,
+            arguments,
+            expected_arguments: experiment_config.expected_arguments,
+            exporters,
+        })
+    }
+}
+
+impl TryFrom<(&Config, &ExperimentConfig, &VariationConfig, &Path)>
+    for Experiment
+{
+    type Error = Error;
+
+    fn try_from(
+        value: (&Config, &ExperimentConfig, &VariationConfig, &Path),
+    ) -> Result<Self> {
+        let (config, experiment_config, variation, storage_dir) = value;
+        let kind = experiment_config
+            .kind
+            .clone()
+            .unwrap_or(ExperimentConfig::DEFAULT_KIND.to_string());
+
+        let setups = map_remote_executions(
+            config,
+            &experiment_config.setups,
+            FileType::Setup,
+            storage_dir,
+        )?;
+
+        let teardowns = map_remote_executions(
+            config,
+            &experiment_config.teardowns,
+            FileType::Teardown,
+            storage_dir,
+        )?;
+
+        let execute = remap_execute(
+            config,
+            &experiment_config.script,
+            &experiment_config.hosts,
+            storage_dir,
+        )?;
+
+        let dependencies =
+            remap_dependencies(&experiment_config.dependencies, storage_dir)?;
+
+        let name = format!("{}-{}", &experiment_config.name, &variation.name);
+        let description = variation
+            .description
+            .clone()
+            .unwrap_or(experiment_config.description.clone());
+
+        let hosts = {
+            let hosts = match variation.hosts.is_empty() {
+                true => experiment_config.hosts.clone(),
+                false => variation.hosts.clone(),
+            };
+            map_hosts(config, &hosts)
+        };
+
+        let expected_arguments = variation
+            .expected_arguments
+            .or(experiment_config.expected_arguments);
+
+        let arguments = match (
+            variation.arguments.clone(),
+            experiment_config.arguments.clone(),
+        ) {
+            (Some(arguments), None) => arguments,
+            (None, Some(arguments)) => arguments.to_vec(),
+            (Some(arguments), Some(_)) => arguments,
+            (None, None) => vec![],
+        };
+
+        let exporters = {
+            let exporters = match variation.exporters.is_empty() {
+                true => &experiment_config.exporters,
+                false => &variation.exporters,
+            };
+            map_exporters(config, exporters)
+        };
+
+        Ok(Self {
+            id: None,
+            name,
+            description,
+            kind,
+            setups,
+            teardowns,
+            hosts,
+            execute,
+            dependencies,
+            arguments,
+            expected_arguments,
+            exporters,
+        })
+    }
+}
+
+impl Display for Experiment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "Experiment")?;
+        write!(f, "id: ")?;
+        match &self.id {
+            Some(id) => writeln!(f, "{id}")?,
+            None => writeln!(f, "None")?,
+        };
+
+        writeln!(f, "name: {}", self.name)?;
+        writeln!(f, "description: {}", self.description)?;
+        writeln!(f, "kind: {}", self.kind)?;
+
+        writeln!(f, "Setups")?;
+        for re in self.setups.iter() {
+            writeln!(f, "{re}")?;
+        }
+
+        writeln!(f, "Teardowns")?;
+        for re in self.teardowns.iter() {
+            writeln!(f, "{re}")?;
+        }
+
+        writeln!(f, "Hosts")?;
+        for host in self.hosts.iter() {
+            writeln!(f, "{host}")?
+        }
+
+        writeln!(f, "{}", &self.execute)?;
+
+        writeln!(f, "Dependencies")?;
+        for dependency in self.dependencies.iter() {
+            writeln!(f, "{}", dependency.display())?;
+        }
+
+        writeln!(f, "Arguments")?;
+        for argument in self.arguments.iter() {
+            writeln!(f, "{argument}")?;
+        }
+
+        write!(f, "expected_arguments: ")?;
+        match self.expected_arguments {
+            Some(expected) => writeln!(f, "{expected}")?,
+            None => writeln!(f, "None")?,
+        };
+
+        writeln!(f, "Exporters")?;
+        for exporter in self.exporters.iter() {
+            writeln!(f, "{exporter}")?;
+        }
+
+        Ok(())
     }
 }
 
@@ -780,6 +1621,22 @@ pub struct Host {
     pub address: String,
 }
 
+impl Host {
+    pub fn localhost() -> Self {
+        Self {
+            name: LOCALHOST.to_string(),
+            address: LOCALHOST.to_string(),
+        }
+    }
+}
+
+impl Display for Host {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "name: {}", &self.name)?;
+        writeln!(f, "address: {}", &self.address)
+    }
+}
+
 /// An [`Exporter`] is nearly identical to a [`ExporterConfig`], except for the [`Exporter::hosts`]
 /// field, which contains full hosts instead of identifiers, making it a bit easier to use in
 /// practice.
@@ -788,16 +1645,16 @@ pub struct Exporter {
     pub name: String,
     pub hosts: Vec<Host>,
     // pub address: String,
-    pub command: String,
-    pub setup: Vec<String>,
+    pub command: CommandSource,
+    pub setup: Option<CommandSource>,
 }
 
 impl Exporter {
     fn new(
         name: String,
         hosts: Vec<Host>,
-        command: String,
-        setup: Vec<String>,
+        command: CommandSource,
+        setup: Option<CommandSource>,
     ) -> Self {
         Self {
             name,
@@ -817,6 +1674,24 @@ impl Exporter {
             // overlapping with a PID file if there is some reason that we want advisory locking,
             // but not PID tracking.
             lock: PathBuf::from(format!("{}.lock", self.name)),
+        }
+    }
+}
+
+impl Display for Exporter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "name: {}", &self.name)?;
+
+        writeln!(f, "Hosts")?;
+        for host in self.hosts.iter() {
+            writeln!(f, "{host}")?;
+        }
+        writeln!(f, "command: {}", &self.command)?;
+
+        write!(f, "setup: ")?;
+        match &self.setup {
+            Some(setup) => writeln!(f, "{setup}"),
+            None => writeln!(f, "None"),
         }
     }
 }
@@ -846,36 +1721,60 @@ pub struct RemoteExecution {
     /// A list of [`Host`]s for remote connections.
     pub hosts: Vec<Host>,
     /// A list of scripts to be run on the [`RemoteExecution::hosts`].
-    pub scripts: Vec<PathBuf>,
+    pub command: CommandSource,
+    // pub scripts: Vec<PathBuf>,
     /// A [`FileType`] stating the nature of the scripts in this struct.
     pub re_type: FileType,
 }
 
 impl RemoteExecution {
-    fn new(hosts: Vec<Host>, scripts: Vec<PathBuf>, re_type: FileType) -> Self {
+    fn new(
+        hosts: Vec<Host>,
+        command: CommandSource,
+        re_type: FileType,
+    ) -> Self {
         Self {
             hosts,
-            scripts,
+            command,
             re_type,
         }
     }
 
     /// Since scripts are stored as absolute paths, this function just returns a vector, taking
     /// only the filename of each script.
-    pub fn remote_scripts(&self) -> Vec<PathBuf> {
+    pub fn remote_scripts(&self) -> Option<PathBuf> {
         //TODO(joren): Decide whether it would be worth organising scripts into
         //setup/teardown/execute directories when they are on remotes.
-        self.scripts
-            .iter()
-            .map(|script| {
-                let filename = script.file_name().unwrap().to_string_lossy();
-                PathBuf::from(filename.to_string())
-                // PathBuf::from(format!(
-                //     "{}/{filename}",
-                //     self.re_type.to_string()
-                // ))
-            })
-            .collect()
+        if let CommandSource::Script(script) = &self.command {
+            let filename = script.file_name().unwrap().to_string_lossy();
+            Some(PathBuf::from(filename.to_string()))
+        } else {
+            None
+        }
+        // self.script.
+        // self.scripts
+        //     .iter()
+        //     .map(|script| {
+        //         let filename = script.file_name().unwrap().to_string_lossy();
+        //         PathBuf::from(filename.to_string())
+        //         // PathBuf::from(format!(
+        //         //     "{}/{filename}",
+        //         //     self.re_type.to_string()
+        //         // ))
+        //     })
+        //     .collect()
+    }
+}
+
+impl Display for RemoteExecution {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "Hosts")?;
+        for host in self.hosts.iter() {
+            writeln!(f, "{host}")?;
+        }
+
+        writeln!(f, "{}", &self.command)?;
+        writeln!(f, "{}", &self.re_type)
     }
 }
 
@@ -891,6 +1790,7 @@ pub enum FileType {
     /// Dependency files are (currently) files that are required for the main script of an
     /// experiment to function correctly. In the future dependencies may exist more broadly.
     Dependency,
+    Exporter,
 }
 
 impl Display for FileType {
@@ -899,6 +1799,7 @@ impl Display for FileType {
             Self::Setup => write!(f, "setup"),
             Self::Teardown => write!(f, "teardown"),
             Self::Execute => write!(f, "execute"),
+            Self::Exporter => write!(f, "exporter"),
             Self::Dependency => write!(f, "dependency"),
         }
     }
@@ -911,6 +1812,7 @@ impl FromStr for FileType {
             "setup" => Self::Setup,
             "teardown" => Self::Teardown,
             "execute" => Self::Execute,
+            "exporter" => Self::Exporter,
             "dependency" => Self::Dependency,
             &_ => Err(Error::ValidationError(format!(
                 "Invalid remote execution type, got {s}"
@@ -937,6 +1839,8 @@ impl TryFrom<&Path> for FileType {
             Ok(Self::Teardown)
         } else if filename.contains("dependency") {
             Ok(Self::Dependency)
+        } else if filename.contains("exporter") {
+            Ok(Self::Exporter)
         } else {
             Ok(Self::Execute)
         }
@@ -944,7 +1848,7 @@ impl TryFrom<&Path> for FileType {
 }
 
 fn map_hosts(config: &Config, hosts: &[String]) -> Vec<Host> {
-    let mapped_hosts = config
+    let mut mapped_hosts = config
         .hosts
         .iter()
         .filter(|c_host| hosts.contains(&c_host.name))
@@ -953,6 +1857,12 @@ fn map_hosts(config: &Config, hosts: &[String]) -> Vec<Host> {
             address: c_host.address.clone(),
         })
         .collect::<Vec<Host>>();
+
+    for host in hosts.iter() {
+        if host == LOCALHOST {
+            mapped_hosts.push(Host::localhost());
+        }
+    }
 
     mapped_hosts
 }
@@ -969,12 +1879,33 @@ fn map_exporters(config: &Config, exporters: &[String]) -> Vec<Exporter> {
         .map(|c_exporter| {
             let hosts = map_hosts(config, &c_exporter.hosts);
 
-            Exporter::new(
-                c_exporter.name.to_string(),
-                hosts,
-                c_exporter.command.to_string(),
-                c_exporter.setup.clone(),
-            )
+            let command = c_exporter.command.clone();
+            let setup = c_exporter.setup.clone();
+
+            // let command = {
+            //     if let Some(command) = &c_exporter.command {
+            //         CommandSource::Command(command.clone())
+            //     } else if let Some(script) = &c_exporter.script {
+            //         CommandSource::Script(script.clone())
+            //     } else {
+            //         panic!(
+            //             "A command somehow wasn't defined for exporter {}",
+            //             c_exporter.name
+            //         );
+            //     }
+            // };
+            //
+            // let setup = {
+            //     if let Some(command) = &c_exporter.setup_command {
+            //         Some(CommandSource::Command(command.clone()))
+            //     } else if let Some(script) = &c_exporter.setup_script {
+            //         Some(CommandSource::Script(script.clone()))
+            //     } else {
+            //         None
+            //     }
+            // };
+
+            Exporter::new(c_exporter.name.to_string(), hosts, command, setup)
         })
         .collect()
 }
@@ -992,16 +1923,19 @@ where
     let hosts = map_hosts(config, hosts);
 
     // This is always one script for the execute key
-    let scripts =
-        vec![remap_filepath(execute, &FileType::Execute, storage_dir)?];
+    let script = remap_filepath(execute, &FileType::Execute, storage_dir)?;
 
-    Ok(RemoteExecution::new(hosts, scripts, FileType::Execute))
+    Ok(RemoteExecution::new(
+        hosts,
+        CommandSource::Script(script),
+        FileType::Execute,
+    ))
 }
 
 fn remap_dependencies<P, R>(
     dependencies: &[P],
     storage_dir: R,
-) -> Result<Vec<PathBuf>>
+) -> io::Result<Vec<PathBuf>>
 where
     P: AsRef<Path>,
     R: AsRef<Path>,
@@ -1012,7 +1946,7 @@ where
         .collect()
 }
 
-fn remap_dependency<P, R>(dependency: P, storage_dir: R) -> Result<PathBuf>
+fn remap_dependency<P, R>(dependency: P, storage_dir: R) -> io::Result<PathBuf>
 where
     P: AsRef<Path>,
     R: AsRef<Path>,
@@ -1020,6 +1954,7 @@ where
     remap_filepath(dependency, &FileType::Dependency, storage_dir)
 }
 
+// TODO(joren): RemoteExecution needs to be updated for this to work.
 fn map_remote_executions<P: AsRef<Path>>(
     config: &Config,
     remote_executions: &[RemoteExecutionConfig],
@@ -1032,15 +1967,22 @@ fn map_remote_executions<P: AsRef<Path>>(
     for remote_execution in remote_executions.iter() {
         let hosts = map_hosts(config, &remote_execution.hosts);
 
-        let mapped_scripts = remap_filepaths(
-            &remote_execution.scripts,
-            &remote_execution_type,
-            &storage_dir,
-        )?;
+        let command = match remote_execution.command {
+            CommandSource::Script(ref script) => {
+                CommandSource::Script(remap_filepath(
+                    script.clone(),
+                    &remote_execution_type,
+                    &storage_dir,
+                )?)
+            }
+            CommandSource::Command(ref command) => {
+                CommandSource::Command(command.clone())
+            }
+        };
 
         mapped_remote_executions.push(RemoteExecution::new(
             hosts,
-            mapped_scripts,
+            command,
             remote_execution_type.clone(),
         ));
     }
@@ -1055,7 +1997,7 @@ fn remap_filepaths<P, R>(
     files: &[P],
     file_type: &FileType,
     storage_dir: R,
-) -> Result<Vec<PathBuf>>
+) -> io::Result<Vec<PathBuf>>
 where
     P: AsRef<Path>,
     R: AsRef<Path>,
@@ -1063,14 +2005,14 @@ where
     files
         .iter()
         .map(|script| remap_filepath(script, file_type, &storage_dir))
-        .collect::<Result<Vec<PathBuf>>>()
+        .collect::<io::Result<Vec<PathBuf>>>()
 }
 
 fn remap_filepath<P, R>(
     file: P,
     file_type: &FileType,
     storage_dir: R,
-) -> Result<PathBuf>
+) -> io::Result<PathBuf>
 where
     P: AsRef<Path>,
     R: AsRef<Path>,
@@ -1083,7 +2025,8 @@ where
         .to_path_buf()
         .join(file_type.to_string())
         .join(basename);
-    Ok(std::path::absolute(new_path)?)
+
+    std::path::absolute(new_path)
 }
 
 /// A type representing a list of experiment variations and the number of times that they need to
@@ -1103,95 +2046,49 @@ pub fn generate_experiments<P: AsRef<Path>>(
     experiment_config: &ExperimentConfig,
     storage_dir: P,
 ) -> Result<ExperimentRuns> {
-    let name = &experiment_config.name;
-    let description = &experiment_config.description;
-    let kind = &experiment_config.kind;
-    let execute = &experiment_config.execute;
-    let dependencies = &experiment_config.dependencies;
-    let setup = &experiment_config.setup;
-    let teardown = &experiment_config.teardown;
     let variations = &experiment_config.variations;
+    let runs = experiment_config
+        .runs
+        .unwrap_or(ExperimentConfig::DEFAULT_RUNS);
 
-    let mut experiments = Vec::with_capacity(variations.len());
+    let mut experiments = Vec::with_capacity(variations.len() + 1);
+
+    if !experiment_config.variations_only {
+        experiments.push(Experiment::try_from((
+            config,
+            experiment_config,
+            storage_dir.as_ref(),
+        ))?);
+    }
 
     for variation in experiment_config.variations.iter() {
-        let name = format!("{name}-{}", &variation.name);
-
-        let expected_arguments = variation
-            .expected_arguments
-            .or(experiment_config.expected_arguments);
-
-        let arguments = match variation.arguments.is_empty() {
-            true => &experiment_config.arguments,
-            false => &variation.arguments,
-        };
-        let hosts = match variation.hosts.is_empty() {
-            true => &experiment_config.hosts,
-            false => &variation.hosts,
-        };
-        // let runners = match variation.runners.is_empty() {
-        //     true => &experiment_config.runners,
-        //     false => &variation.runners,
-        // };
-        let exporters = match variation.exporters.is_empty() {
-            true => &experiment_config.exporters,
-            false => &variation.exporters,
-        };
-
-        experiments.push(Experiment {
-            id: None,
-            name,
-            description: description.clone(),
-            kind: kind.clone(),
-            setup: map_remote_executions(
-                config,
-                setup,
-                FileType::Setup,
-                &storage_dir,
-            )?,
-            teardown: map_remote_executions(
-                config,
-                teardown,
-                FileType::Teardown,
-                &storage_dir,
-            )?,
-            // TODO(joren): These hosts may no longer be needed,
-            // they are included in the struct where needed
-            hosts: map_hosts(config, hosts),
-            execute: remap_execute(config, execute, hosts, &storage_dir)?,
-            dependencies: remap_dependencies(dependencies, &storage_dir)?,
-            expected_arguments,
-            arguments: arguments.clone(),
-            exporters: map_exporters(config, exporters),
-        });
+        experiments.push(Experiment::try_from((
+            config,
+            experiment_config,
+            variation,
+            storage_dir.as_ref(),
+        ))?);
     }
-    Ok((experiment_config.runs, experiments))
+    Ok((runs, experiments))
 }
 
-pub fn check_file_exists<P: AsRef<Path>>(file: P) -> io::Result<()> {
-    let exists = file.as_ref().try_exists()?;
-
-    match exists {
-        true => Ok(()),
-        false => Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            format!("File '{}' does not exist", file.as_ref().display()),
-        )),
-    }
-}
-
-pub fn check_files_exist<P: AsRef<Path>>(files: &[P]) -> io::Result<()> {
+pub fn check_files_exist<P: AsRef<Path>, R: AsRef<Path>>(
+    files: &[P],
+    file_type: &FileType,
+    storage_dir: &R,
+) -> io::Result<()> {
+    let files = remap_filepaths(files, file_type, storage_dir)?;
     for file in files.iter() {
-        check_file_exists(file)?;
+        let exists = file.try_exists()?;
+
+        match exists {
+            true => {}
+            false => Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("File '{}' does not exist", file.display()),
+            ))?,
+        };
     }
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    // use super::*;
-    // use std::collections::HashMap;
-    // use std::path::PathBuf;
-    // use std::str::FromStr;
 }

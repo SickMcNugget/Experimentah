@@ -1,7 +1,7 @@
 //! Functionality for queueing and running experiments.
 
 use crate::parse::{
-    Experiment, ExperimentRuns, Exporter, Host, RemoteExecution,
+    CommandSource, Experiment, ExperimentRuns, Exporter, Host, RemoteExecution,
 };
 use crate::{
     command, file_to_deps_path, time_since_epoch, variation_dir_parts,
@@ -458,7 +458,7 @@ impl ExperimentRunner {
 
                     Self::run_remote_executions(
                         &sessions,
-                        &experiment.setup,
+                        &experiment.setups,
                         &experiment_directory,
                         variation_directory,
                     )
@@ -476,7 +476,7 @@ impl ExperimentRunner {
 
                     Self::run_remote_executions(
                         &sessions,
-                        &experiment.teardown,
+                        &experiment.teardowns,
                         &experiment_directory,
                         variation_directory,
                     )
@@ -578,23 +578,16 @@ impl ExperimentRunner {
     ) -> Result<()> {
         for experiment in experiments.iter() {
             let execute = &experiment.execute;
-            // let fname = execute
-            //     .scripts
-            //     .first()
-            //     .unwrap()
-            //     .file_name()
-            //     .unwrap()
-            //     .to_string_lossy();
-            let execute_directory = experiment_directory.join(format!(
-                "{}-deps",
-                execute
-                    .scripts
-                    .first()
-                    .unwrap()
-                    .file_name()
-                    .unwrap()
-                    .to_string_lossy()
-            ));
+
+            let execute_directory = match &execute.command {
+                CommandSource::Command(_) => experiment_directory.to_path_buf(),
+                CommandSource::Script(script) => {
+                    experiment_directory.join(format!(
+                        "{}-deps",
+                        script.file_name().unwrap().to_string_lossy()
+                    ))
+                }
+            };
 
             session::make_directory(sessions, &execute_directory).await?;
 
@@ -651,21 +644,14 @@ impl ExperimentRunner {
         for exporter in exporters_clone.into_iter() {
             let exporter_sessions =
                 Self::filter_host_sessions(sessions, &exporter.hosts);
-
-            let exporter_clone = exporter.clone();
             let variation_directory_clone = variation_directory.to_path_buf();
+            // let exporter_clone = exporter.cloen()
+            let exporter_clone = exporter.clone();
 
             futures.push(tokio::task::spawn(async move {
-                for setup in exporter_clone.setup.iter() {
-                    let command_args =
-                        shlex::split(setup).ok_or_else(|| {
-                            Error::from(format!(
-                                "Invalid setup command for exporter '{}': {}",
-                                exporter.name, setup
-                            ))
-                        })?;
+                if let Some(setup) = &exporter_clone.setup {
                     let mut shell_command =
-                        ShellCommand::from_command_args(&command_args);
+                        ShellCommand::from_parsed_command(setup);
                     shell_command.working_directory(&variation_directory_clone);
                     command::run_command(
                         &exporter_sessions,
@@ -707,13 +693,8 @@ impl ExperimentRunner {
             let mut exporter_files = exporter.shell_files();
             exporter_files.set_base(exporter_dir);
 
-            let parts = shlex::split(&exporter.command).ok_or_else(|| {
-                Error::from(format!(
-                    "Invalid exporter command for exporter '{}': {}",
-                    exporter.name, &exporter.command
-                ))
-            })?;
-            let mut shell_command = ShellCommand::from_command_args(&parts);
+            let mut shell_command =
+                ShellCommand::from_parsed_command(&exporter.command);
             shell_command
                 .working_directory(variation_directory)
                 .stdout_file(&exporter_files.stdout)
@@ -847,10 +828,12 @@ impl ExperimentRunner {
         let filter_sessions =
             Self::filter_host_sessions(sessions, &remote_execution.hosts);
 
-        let deps_path = file_to_deps_path(
-            experiment_directory,
-            remote_execution.scripts.first().unwrap(),
-        );
+        let script = match &remote_execution.command {
+            CommandSource::Script(script) => script,
+            CommandSource::Command(_) => return Ok(vec![]),
+        };
+
+        let deps_path = file_to_deps_path(experiment_directory, script);
 
         let command_args: Vec<String> = [
             "ln".to_string(),

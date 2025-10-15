@@ -1,0 +1,19 @@
+name = "experiment-config-test-expected-arguments"
+description = "A test checking whether arguments are being validated correctly when only_variations=false"
+hosts = ["test-runner"]
+
+script = "actual-work.sh"
+arguments = ["Argument 1", "Argument 2"]
+expected_arguments = 2
+
+variations_only = false
+
+[[variations]]
+name = "no-arguments"
+expected_arguments = 0
+arguments = []
+
+[[variations]]
+name = "one-argument"
+expected_arguments = 1
+arguments = ["Argument 1"]
