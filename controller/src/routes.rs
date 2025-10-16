@@ -1,16 +1,18 @@
 use std::{
-    os::unix::fs::PermissionsExt,
-    path::PathBuf,
-    str::FromStr,
-    sync::{atomic::Ordering, Arc},
+    os::unix::fs::PermissionsExt, path::PathBuf, str::FromStr, sync::Arc,
 };
 
 use axum::{
     body::Bytes,
-    extract::{Multipart, State},
+    extract::{
+        ws::{Message, WebSocket},
+        Multipart, State, WebSocketUpgrade,
+    },
+    response::Response,
     Json,
 };
 use log::info;
+use tokio::sync::Mutex;
 
 use crate::{
     parse::{self, Config, ExperimentConfig, FileType},
@@ -61,11 +63,7 @@ pub async fn run(
 /// Retrieves the current state of the [`crate::run::ExperimentRunner`].
 pub async fn status(State(run_state): State<RunState>) -> String {
     let runner = &run_state;
-    let current_experiment = runner.current_experiment.lock().await;
-    let current_run = runner.current_run.load(Ordering::Relaxed);
-    let current_runs = runner.current_runs.load(Ordering::Relaxed);
-
-    format!("Current Experiment: {current_experiment:?}, Current run: {current_run:?}/{current_runs:?}")
+    runner.current.status().await
 }
 
 pub async fn upload(mut multipart: Multipart) -> Result<(), String> {
@@ -110,6 +108,110 @@ pub async fn upload(mut multipart: Multipart) -> Result<(), String> {
     info!("Saved file {:?} to {:?}", path.file_name().unwrap(), path);
 
     Ok(())
+}
+
+pub async fn ws_handler(
+    ws: WebSocketUpgrade,
+    State(run_state): State<RunState>,
+) -> Response {
+    info!("We websocketing");
+    ws.on_upgrade(|socket| handle_socket(socket, run_state))
+}
+
+async fn handle_socket(mut socket: WebSocket, runner: RunState) {
+    // We receive one message on this websocket?
+    if let Some(msg) = socket.recv().await {
+        if let Ok(msg) = msg {
+            process_message(msg);
+        }
+    } else {
+        eprintln!("Websocket abruptly closed");
+    }
+
+    // Assume after we process the message that we now have both a host and a filename/exporter
+    // name
+
+    let thing = Thing {
+        host: String::from("root@prod-agent1.recsa.prod"),
+        filetype: FileType::Exporter,
+        identifier: String::from("sar-exporter"),
+    };
+
+    // We need to setup a *follow* for the file requested, that allows us to tune into the
+    // stdout/stderr of the file, which we can stream as required.
+    let (mut stdout, mut stderr) = match runner.tail_stdout_stderr(thing).await
+    {
+        Ok((stdout, stderr)) => (stdout, stderr),
+        Err(e) => match e {
+            crate::run::Error::FollowError(error) => {
+                eprintln!("{error}");
+                socket.send(Message::Close(None)).await.unwrap();
+                return;
+            }
+            _ => panic!("{e}"),
+        },
+    };
+
+    // Splitting seems to kill our socket.
+
+    let socket_stdout = Arc::new(Mutex::new(socket));
+    let socket_stderr = Arc::clone(&socket_stdout);
+
+    let stdout_handle = tokio::spawn(async move {
+        while let Some(msg) = stdout.recv().await {
+            match socket_stdout.lock().await.send(msg).await {
+                Ok(()) => {}
+                Err(_e) => break,
+            }
+        }
+    });
+
+    let stderr_handle = tokio::spawn(async move {
+        while let Some(msg) = stderr.recv().await {
+            match socket_stderr.lock().await.send(msg).await {
+                Ok(()) => {}
+                Err(_e) => break,
+            }
+        }
+    });
+    println!("Waiting on handles to send to the websocket");
+
+    let (ret1, ret2) = tokio::join!(stdout_handle, stderr_handle);
+    ret1.unwrap();
+    ret2.unwrap();
+    println!("Handles joined!");
+}
+
+pub struct Thing {
+    pub host: String,
+    pub identifier: String,
+    pub filetype: FileType,
+}
+
+fn process_message(msg: Message) {
+    match msg {
+        Message::Close(c) => {
+            if let Some(cf) = c {
+                println!(
+                    ">>> Received a close message with code {} and reason `{}`",
+                    cf.code, cf.reason
+                );
+            } else {
+                eprintln!(
+                    ">>> Somehow a close message was sent without a closeframe"
+                );
+            }
+        }
+        Message::Text(d) => {
+            println!("Yay!: {d}");
+        }
+        Message::Binary(d) => {
+            println!(">>> sent {} bytes: {d:?}", d.len());
+        }
+        _ => {
+            panic!("Unexpected message type received");
+        }
+    }
 }
 
 #[cfg(test)]

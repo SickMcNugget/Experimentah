@@ -931,21 +931,13 @@ fn arguments_check_lax(
     expected_arguments: Option<usize>,
     arguments: Option<&Vec<String>>,
 ) -> Result<()> {
-    match (expected_arguments, arguments) {
-        // (Some(expected), None) => {
-        //     if expected != 0 {
-        //         Err(Error::ValidationError("expected_arguments should be set to 0 if arguments is unset".to_string()))?;
-        //     }
-        // }
-        (Some(expected), Some(arguments)) => {
-            if expected != arguments.len() {
-                Err(Error::ValidationError(format!(
-                    "Expected {expected} arguments, got {}",
-                    arguments.len()
-                )))?;
-            }
+    if let (Some(expected), Some(arguments)) = (expected_arguments, arguments) {
+        if expected != arguments.len() {
+            Err(Error::ValidationError(format!(
+                "Expected {expected} arguments, got {}",
+                arguments.len()
+            )))?;
         }
-        _ => {}
     }
 
     Ok(())
@@ -1779,7 +1771,7 @@ impl Display for RemoteExecution {
 }
 
 /// Describes the significance of a file for remote use.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, strum::EnumIter)]
 pub enum FileType {
     /// Setup files are used during the setup stage of an experiment.
     Setup,
