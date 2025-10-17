@@ -1155,6 +1155,8 @@ impl Display for VariationConfig {
 /// This struct is generally used for setup, teardown and execution of the main test script.
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 pub struct RemoteExecutionConfig {
+    /// An identifier for this remote execution, primarily for the purpose of tailing output.
+    pub name: String,
     /// A list of host identifiers referencing [`HostConfig`]s found inside of a [`Config`].
     pub hosts: Vec<String>,
     /// The shell command/script to be run in parallel on all hosts defined in
@@ -1177,6 +1179,7 @@ pub struct RemoteExecutionConfig {
 
 impl RemoteExecutionConfig {
     pub fn new<S: Into<String> + Clone>(
+        name: S,
         hosts: &[S],
         command: CommandSource,
     ) -> Self {
@@ -1184,6 +1187,7 @@ impl RemoteExecutionConfig {
             hosts.iter().map(|host| host.clone().into()).collect();
 
         Self {
+            name: name.into(),
             hosts,
             command,
             dependencies: Default::default(),
@@ -1710,6 +1714,9 @@ impl ExporterFiles {
 /// more information.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RemoteExecution {
+    /// An identifier for this remote execution, to be used
+    /// primarily for following process output logs.
+    pub name: String,
     /// A list of [`Host`]s for remote connections.
     pub hosts: Vec<Host>,
     /// A list of scripts to be run on the [`RemoteExecution::hosts`].
@@ -1721,11 +1728,13 @@ pub struct RemoteExecution {
 
 impl RemoteExecution {
     fn new(
+        name: String,
         hosts: Vec<Host>,
         command: CommandSource,
         re_type: FileType,
     ) -> Self {
         Self {
+            name,
             hosts,
             command,
             re_type,
@@ -1760,6 +1769,8 @@ impl RemoteExecution {
 
 impl Display for RemoteExecution {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "name: {}", &self.name)?;
+
         writeln!(f, "Hosts")?;
         for host in self.hosts.iter() {
             writeln!(f, "{host}")?;
@@ -1918,6 +1929,7 @@ where
     let script = remap_filepath(execute, &FileType::Execute, storage_dir)?;
 
     Ok(RemoteExecution::new(
+        "execute".to_string(),
         hosts,
         CommandSource::Script(script),
         FileType::Execute,
@@ -1973,6 +1985,7 @@ fn map_remote_executions<P: AsRef<Path>>(
         };
 
         mapped_remote_executions.push(RemoteExecution::new(
+            remote_execution.name.clone(),
             hosts,
             command,
             remote_execution_type.clone(),

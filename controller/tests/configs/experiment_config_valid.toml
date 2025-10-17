@@ -36,6 +36,8 @@ variations_only = false
 
 # Optional: A list of setup instructions to run across different hosts
 [[setups]]
+# Required: The name for this setup
+name = "main-setup"
 # Required: The hosts to perform this setup on
 hosts = ["test-runner"]
 # The below options "script" and "command" are mutually exclusive, but one must be run.
@@ -52,6 +54,8 @@ dependencies = ["setup-dependency.sh"]
 
 # Optional: A list of teardown instructions to run across different hosts
 [[teardowns]]
+# Required: the name for this teardown
+name = "main-teardown"
 hosts = ["test-runner"]
 # The below options "script" and "command" are mutually exclusive, but one must be run.
 # The script to perform setup on this host
