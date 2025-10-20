@@ -131,7 +131,7 @@ async fn handle_socket(mut socket: WebSocket, runner: RunState) {
     // Assume after we process the message that we now have both a host and a filename/exporter
     // name
 
-    let thing = Thing {
+    let process_output_request = ProcessOutputRequest {
         host: String::from("root@prod-agent1.recsa.prod"),
         filetype: FileType::Exporter,
         identifier: String::from("sar-exporter"),
@@ -139,41 +139,37 @@ async fn handle_socket(mut socket: WebSocket, runner: RunState) {
 
     // We need to setup a *follow* for the file requested, that allows us to tune into the
     // stdout/stderr of the file, which we can stream as required.
-    let (mut stdout, mut stderr) = match runner.tail_stdout_stderr(thing).await
-    {
-        Ok((stdout, stderr)) => (stdout, stderr),
-        Err(e) => match e {
-            crate::run::Error::FollowError(error) => {
-                eprintln!("{error}");
-                socket.send(Message::Close(None)).await.unwrap();
-                return;
-            }
-            _ => panic!("{e}"),
-        },
-    };
-
-    // Splitting seems to kill our socket.
+    let (mut stdout, mut stderr) =
+        match runner.tail_stdout_stderr(process_output_request).await {
+            Ok((stdout, stderr)) => (stdout, stderr),
+            Err(e) => match e {
+                crate::run::Error::FollowError(error) => {
+                    eprintln!("{error}");
+                    socket.send(Message::Close(None)).await.unwrap();
+                    return;
+                }
+                _ => panic!("{e}"),
+            },
+        };
 
     let socket_stdout = Arc::new(Mutex::new(socket));
     let socket_stderr = Arc::clone(&socket_stdout);
 
-    let stdout_handle = tokio::spawn(async move {
-        while let Some(msg) = stdout.recv().await {
-            match socket_stdout.lock().await.send(msg).await {
-                Ok(()) => {}
-                Err(_e) => break,
-            }
-        }
-    });
+    macro_rules! poll_stream {
+        ($stream:ident, $socket:ident) => {
+            tokio::spawn(async move {
+                while let Some(msg) = $stream.recv().await {
+                    match $socket.lock().await.send(msg).await {
+                        Ok(()) => {}
+                        Err(_e) => break,
+                    }
+                }
+            })
+        };
+    }
 
-    let stderr_handle = tokio::spawn(async move {
-        while let Some(msg) = stderr.recv().await {
-            match socket_stderr.lock().await.send(msg).await {
-                Ok(()) => {}
-                Err(_e) => break,
-            }
-        }
-    });
+    let stdout_handle = poll_stream!(stdout, socket_stdout);
+    let stderr_handle = poll_stream!(stderr, socket_stderr);
     println!("Waiting on handles to send to the websocket");
 
     let (ret1, ret2) = tokio::join!(stdout_handle, stderr_handle);
@@ -182,7 +178,7 @@ async fn handle_socket(mut socket: WebSocket, runner: RunState) {
     println!("Handles joined!");
 }
 
-pub struct Thing {
+pub struct ProcessOutputRequest {
     pub host: String,
     pub identifier: String,
     pub filetype: FileType,

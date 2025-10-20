@@ -969,25 +969,42 @@ impl ExperimentRunner {
 
     pub async fn tail_stdout_stderr(
         &self,
-        thing: crate::routes::Thing,
+        process_output_request: crate::routes::ProcessOutputRequest,
     ) -> Result<(UnboundedReceiver<Message>, UnboundedReceiver<Message>)> {
-        let sessions = self.filter_sessions(&[thing.host]).await;
+        let sessions =
+            self.filter_sessions(&[process_output_request.host]).await;
 
         // We need to make sure that our exporter/setup/teardown/execute is running
-        if thing.filetype == FileType::Exporter {
-            match self.current.exporters.read().await.get(&thing.identifier) {
+        match process_output_request.filetype {
+            FileType::Setup => {}
+            FileType::Teardown => {}
+            FileType::Execute => {}
+            FileType::Exporter => {}
+            _ => {
+                unreachable!();
+            }
+        }
+
+        if process_output_request.filetype == FileType::Exporter {
+            match self
+                .current
+                .exporters
+                .read()
+                .await
+                .get(&process_output_request.identifier)
+            {
                 Some(handle) => dbg!(handle),
                 None => {
                     return Err(Error::FollowError(format!(
                         "The exporter {} is not running",
-                        thing.identifier
+                        process_output_request.identifier
                     )))
                 }
             };
         }
 
-        let stdout = format!("{}.stdout", thing.identifier);
-        let stderr = format!("{}.stderr", thing.identifier);
+        let stdout = format!("{}.stdout", process_output_request.identifier);
+        let stderr = format!("{}.stderr", process_output_request.identifier);
 
         let mut stdout_shell_command = ShellCommand::from_command("tail");
         stdout_shell_command
@@ -997,7 +1014,10 @@ impl ExperimentRunner {
                 "-f".to_string(),
                 stdout,
             ])
-            .working_directory(self.configuration.live_dir(&thing.filetype));
+            .working_directory(
+                self.configuration
+                    .live_dir(&process_output_request.filetype),
+            );
 
         let mut stderr_shell_command = ShellCommand::from_command("tail");
         stderr_shell_command
@@ -1007,7 +1027,10 @@ impl ExperimentRunner {
                 "-f".to_string(),
                 stderr,
             ])
-            .working_directory(self.configuration.live_dir(&thing.filetype));
+            .working_directory(
+                self.configuration
+                    .live_dir(&process_output_request.filetype),
+            );
 
         let stdout_handle = command::run_command(
             &sessions,
