@@ -366,6 +366,6 @@ struct ExecutionPathway {
     validate: bool,
     #[arg(short, long)]
     status: bool,
-    #[arg(short, long, value_delimiter = ',', value_parser = parse_upload)]
+    #[arg(short, long, value_delimiter = ',', value_parser = parse_upload, help="A comma-separated list of files to upload. You can specify the type of file (execute, setup, teardown, dependency script) with a space. e.g. \"my_file.sh execute,another_file.sh setup\". Note that execute is chosen by default, and if filenames contain setup/teardown/execute the respective option is chosen.")]
     upload: Vec<(PathBuf, FileType)>,
 }
