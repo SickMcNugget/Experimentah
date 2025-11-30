@@ -468,6 +468,98 @@ impl Display for CommandSource {
     }
 }
 
+/// A [`PublicExperimentConfig`] is similar to an ExperimentConfig, with some internal types
+/// hidden away from users.
+#[derive(Serialize, Deserialize, Debug, PartialEq, Default)]
+pub struct PublicExperimentConfig {
+    // The ID is generated externally.
+    // pub id: Option<String>,
+    /// An identifier for an experiment. The name of an experiment is with the name
+    /// given inside of a [`VariationConfig`] using a '-' character. Names must be non-empty.
+    pub name: String,
+    /// A description of the experiment which may provide important information for later
+    /// reference. Descriptions may be empty.
+    pub description: String,
+    /// The [`ExperimentConfig::script`] file points to the main shell which runs the experiment.
+    pub script: PathBuf,
+    /// A list of identifiers representing [`HostConfig`]s defined in the main [`Config`].
+    pub hosts: Vec<String>,
+    /// Dependencies is a list of paths that the [`ExperimentConfig::script`] script relies on. These files/directories are
+    /// sent to remote hosts inside of a directory named *execute*-deps when an experiment begins.
+    /// For each variation/repeat of the experiment, these files are then symlinked into the
+    /// current variation directory so that the script can detect them.
+    #[serde(default)]
+    pub dependencies: Vec<PathBuf>,
+    /// Arguments contains a list of command line arguments that are sent to the [`ExperimentConfig::script`] script.
+    #[serde(default)]
+    pub arguments: Option<Vec<String>>,
+    /// expected_arguments is an optional field for validating that each variation of the
+    /// experiment is providing the correct number of arguments to the [`ExperimentConfig::script`] script.
+    pub expected_arguments: Option<usize>,
+    /// A 'kind' is another identifier that may be useful for determining the output type of an
+    /// experiment. If the format of results changes for an experiment, it may be worth updating
+    /// the 'kind' field to indicate this.
+    pub kind: Option<String>,
+    /// runs represents the number of times an experiment should be repeated. This value can be any
+    /// number in the range [1,65536). Note that the order of runs is to perform every single
+    /// variation of an experiment and then repeat. This breadth-first ordering is generally
+    /// preferable when running experiments.
+    pub runs: Option<u16>,
+    /// A list of identifiers representing [`ExporterConfig`]s defined in the main [`Config`].
+    #[serde(default)]
+    pub exporters: Vec<String>,
+    /// Setups contains a list of scripts to run on various remote hosts for preparing an
+    /// experiment.
+    #[serde(default)]
+    pub setups: Vec<PublicRemoteExecutionConfig>,
+    /// Teardowns contains a list of scripts to run on various remote hosts for preparing an
+    /// experiment.
+    #[serde(default)]
+    pub teardowns: Vec<PublicRemoteExecutionConfig>,
+    /// Variations allow an experiment to be run with minor variations, such as changing the input
+    /// arguments/number of arguments, changing the exporters and/or changing the hosts which the
+    /// experiment runs on.
+    #[serde(default)]
+    pub variations: Vec<VariationConfig>,
+    /// If this boolean is enabled, a top-level Experiment is not created.
+    /// This means that ONLY variations will be used to create experiments.
+    /// Defaults to false
+    #[serde(default)]
+    pub variations_only: bool,
+}
+
+impl PublicExperimentConfig {
+    fn to_internal(self) -> ExperimentConfig {
+        let setups = self
+            .setups
+            .into_iter()
+            .map(|setup| setup.to_internal(FileType::Setup))
+            .collect();
+        let teardowns = self
+            .teardowns
+            .into_iter()
+            .map(|teardown| teardown.to_internal(FileType::Teardown))
+            .collect();
+
+        ExperimentConfig {
+            name: self.name,
+            description: self.description,
+            script: self.script,
+            hosts: self.hosts,
+            dependencies: self.dependencies,
+            arguments: self.arguments,
+            expected_arguments: self.expected_arguments,
+            kind: self.kind,
+            runs: self.runs,
+            exporters: self.exporters,
+            setups: setups,
+            teardowns: teardowns,
+            variations: self.variations,
+            variations_only: self.variations_only,
+        }
+    }
+}
+
 /// An [`ExperimentConfig`] defines an experiment to be run. Relies on a valid [`Config`] file
 /// existing before one can be defined.
 #[derive(Serialize, Deserialize, Debug, PartialEq, Default)]
@@ -1159,6 +1251,32 @@ impl Display for VariationConfig {
     }
 }
 
+/// A [`PublicRemoteExecutionConfig`] shares many fields of [`RemoteExecutionConfig`], except
+/// the file_type field is removed so users cannot specify it.
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+pub struct PublicRemoteExecutionConfig {
+    /// A list of host identifiers referencing [`HostConfig`]s found inside of a [`Config`].
+    pub hosts: Vec<String>,
+    /// The shell command/script to be run in parallel on all hosts defined in
+    /// [`RemoteExecutionConfig::hosts`].
+    #[serde(flatten)]
+    pub command: CommandSource,
+    /// A list of dependencies that the command/script requires to function correctly.
+    #[serde(default)]
+    pub dependencies: Vec<PathBuf>,
+}
+
+impl PublicRemoteExecutionConfig {
+    fn to_internal(self, file_type: FileType) -> RemoteExecutionConfig {
+        RemoteExecutionConfig {
+            hosts: self.hosts,
+            command: self.command,
+            dependencies: self.dependencies,
+            file_type: Some(file_type),
+        }
+    }
+}
+
 /// A [`RemoteExecutionConfig`] represents 1 or more scripts to be run remotely on 1 or more hosts.
 /// This struct is generally used for setup, teardown and execution of the main test script.
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
@@ -1179,7 +1297,6 @@ pub struct RemoteExecutionConfig {
     #[serde(default)]
     pub dependencies: Vec<PathBuf>,
     /// The FileType of this remote execution
-    #[serde(skip)]
     pub file_type: Option<FileType>,
 }
 
@@ -1779,7 +1896,7 @@ impl Display for RemoteExecution {
 }
 
 /// Describes the significance of a file for remote use.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub enum FileType {
     /// Setup files are used during the setup stage of an experiment.
     Setup,
