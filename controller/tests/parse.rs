@@ -872,6 +872,7 @@ fn remote_execution_tests(
         (None, true, true),
         (
             Some([RemoteExecutionConfig::new(
+                "Basic command",
                 &["test-runner"],
                 CommandSource::from_command("echo hello"),
             )]),
@@ -880,6 +881,7 @@ fn remote_execution_tests(
         ),
         (
             Some([RemoteExecutionConfig::new(
+                "Script",
                 &["test-runner"],
                 CommandSource::from_script("myscript.sh"),
             )]),
@@ -888,6 +890,7 @@ fn remote_execution_tests(
         ),
         (
             Some([RemoteExecutionConfig::new(
+                "Script with dependency",
                 &["test-runner"],
                 CommandSource::from_script("myscript.sh"),
             )
@@ -896,21 +899,23 @@ fn remote_execution_tests(
             true,
             true,
         ),
+        // (
+        //     Some([RemoteExecutionConfig::new(
+        //         ""
+        //         &["test-runner"],
+        //         CommandSource::from_script("myscript.sh"),
+        //     )
+        //     .with_dependencies(&["script_dependency.sh"])
+        //     // We only use file_type internally, so it's always
+        //     // set to the correct value (Setup)
+        //     // .with_file_type(FileType::Setup)
+        //     .clone()]),
+        //     true,
+        //     true,
+        // ),
         (
             Some([RemoteExecutionConfig::new(
-                &["test-runner"],
-                CommandSource::from_script("myscript.sh"),
-            )
-            .with_dependencies(&["script_dependency.sh"])
-            // We only use file_type internally, so it's always
-            // set to the correct value (Setup)
-            // .with_file_type(FileType::Setup)
-            .clone()]),
-            true,
-            true,
-        ),
-        (
-            Some([RemoteExecutionConfig::new(
+                "Command with explicitly no dependencies",
                 &["test-runner"],
                 CommandSource::from_command("echo hello"),
             )
@@ -920,7 +925,8 @@ fn remote_execution_tests(
             true,
         ),
         (
-            Some([RemoteExecutionConfig::new::<String>(
+            Some([RemoteExecutionConfig::new(
+                "No hosts",
                 &[],
                 CommandSource::from_command("echo hello"),
             )]),
@@ -929,6 +935,7 @@ fn remote_execution_tests(
         ),
         (
             Some([RemoteExecutionConfig::new(
+                "One empty host",
                 &[""],
                 CommandSource::from_command("echo hello"),
             )]),
@@ -937,6 +944,7 @@ fn remote_execution_tests(
         ),
         (
             Some([RemoteExecutionConfig::new(
+                "Empty command",
                 &["test-runner"],
                 CommandSource::from_command(""),
             )]),
@@ -945,6 +953,7 @@ fn remote_execution_tests(
         ),
         (
             Some([RemoteExecutionConfig::new(
+                "Command with one empty dependency",
                 &["test-runner"],
                 CommandSource::from_command("echo hello"),
             )
@@ -1247,18 +1256,37 @@ fn to_experiments() {
         address: "testuser@testserver.internal".to_string(),
     };
 
-    let scripts: HashMap<&str, PathBuf> = HashMap::from([
-        ("setup", basepath.join("setup/test-setup.sh")),
-        ("teardown", basepath.join("teardown/test-teardown.sh")),
-        ("execute", basepath.join("execute/actual-work.sh")),
+    let scripts: HashMap<&str, (String, PathBuf)> = HashMap::from([
+        (
+            "setup",
+            (
+                String::from("main-setup"),
+                basepath.join("setup/test-setup.sh"),
+            ),
+        ),
+        (
+            "teardown",
+            (
+                String::from("main-teardown"),
+                basepath.join("teardown/test-teardown.sh"),
+            ),
+        ),
+        (
+            "execute",
+            (
+                String::from("execute"),
+                basepath.join("execute/actual-work.sh"),
+            ),
+        ),
     ]);
 
     let mut remote_executions: HashMap<&str, Vec<RemoteExecution>> =
         HashMap::with_capacity(scripts.len());
-    for (stage, script) in scripts.iter() {
+    for (stage, (name, script)) in scripts.iter() {
         remote_executions.insert(
             stage,
             vec![RemoteExecution {
+                name: name.clone(),
                 hosts: vec![re_host.clone()],
                 command: CommandSource::Script(script.clone()),
                 re_type: FileType::from_str(stage).unwrap(),
